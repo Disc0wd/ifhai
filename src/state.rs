@@ -30,6 +30,16 @@ pub struct App {
     /// SHA-256 of the installed file when it is known (a verified download); empty otherwise.
     pub sha256: String,
     pub electron: bool,
+    /// GitHub repos named in the app's bundled metadata. Candidates only: one becomes the update
+    /// source if and when its latest release is verified to contain this app's file.
+    #[serde(default)]
+    pub hints: Vec<String>,
+    /// Already tried to turn the hints into an update source (each app costs at most one lookup).
+    #[serde(default)]
+    pub hints_tried: bool,
+    /// The file's original name, e.g. `Foo-1.2.3-x86_64.AppImage`: the template for matching releases.
+    #[serde(default)]
+    pub origin_name: String,
     pub installed_at: u64,
     pub previous: Option<Previous>,
     // Everything ifhai created for this app. Removal deletes exactly this and nothing else.
@@ -119,6 +129,8 @@ pub struct Dirs {
     pub applications: PathBuf,
     pub icons: PathBuf,
     pub state_file: PathBuf,
+    /// Disposable downloads (the catalogue).
+    pub cache: PathBuf,
 }
 
 fn xdg(var: &str, fallback: &Path, home: &Path) -> PathBuf {
@@ -138,6 +150,7 @@ impl Dirs {
             applications: data.join("applications"),
             icons: data.join("icons").join("hicolor"),
             state_file: data.join("ifhai").join("state.toml"),
+            cache: xdg("XDG_CACHE_HOME", Path::new(".cache"), home).join("ifhai"),
         }
     }
 
@@ -175,6 +188,9 @@ mod tests {
             source: None,
             sha256: "00".into(),
             electron: false,
+            hints: vec![],
+            hints_tried: false,
+            origin_name: String::new(),
             installed_at: 1,
             previous: None,
             file: format!("/h/Applications/{slug}.AppImage").into(),

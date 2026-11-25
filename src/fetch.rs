@@ -13,6 +13,11 @@ pub trait Fetcher: Sync {
     fn file(&self, url: &str, dest: &Path) -> Result<()>;
     /// Newest release tag of a GitHub repo, or None if it has no releases. No API call involved.
     fn latest_tag(&self, repo: &str) -> Result<Option<String>>;
+    /// Build `dest` from the previous version `seed` plus only the changed blocks, using `zsync`
+    /// when it is installed. Any error means "do a normal download instead".
+    fn delta(&self, _zsync_url: &str, _seed: &Path, _dest: &Path) -> Result<()> {
+        Err(Error::NotFound("delta updates are not available".into()))
+    }
 }
 
 pub struct Curl;
@@ -134,6 +139,33 @@ impl Fetcher for Curl {
             let _ = std::fs::remove_file(dest);
         }
         result
+    }
+
+    fn delta(&self, zsync_url: &str, seed: &Path, dest: &Path) -> Result<()> {
+        if !zsync_url.starts_with("https://") {
+            return Err(Error::NotFound(
+                "delta updates need an https:// link".into(),
+            ));
+        }
+        let ok = Command::new("zsync")
+            .args(["-q", "-i"])
+            .arg(seed)
+            .arg("-o")
+            .arg(dest)
+            .arg(zsync_url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok && dest.exists() {
+            Ok(())
+        } else {
+            let _ = std::fs::remove_file(dest);
+            Err(Error::NotFound(
+                "zsync is not installed or could not build the update".into(),
+            ))
+        }
     }
 
     fn latest_tag(&self, repo: &str) -> Result<Option<String>> {

@@ -11,23 +11,26 @@
 
 > ## Implementation status (v0.1.0)
 >
-> Built and tested: `install` from a local file (FR-101..105), from `owner/repo` and from an `https://`
-> link, `remove`, `list`, `run`, `updates`, `update`, `rollback`, `doctor`; FUSE detection with
-> unpacked mode; digest/checksum verification; embedded GitHub update information.
+> Built and tested: `install` from a local file (FR-101..105), from an app **name** (catalogue,
+> FR-001/011..014/031..033), `owner/repo` and an `https://` link, `search`, `remove`, `list`, `run`,
+> `updates`, `update`, `rollback`, `doctor`; FUSE detection with unpacked mode; digest/checksum
+> verification; update sources from embedded update info, the browser's recorded download URL and
+> verified repo hints from the app's own metadata; interactive choice among equal candidates;
+> delta updates through `zsync` when installed; an "Install with ifhai" Open With entry (FR-106).
 >
 > **Deliberately simpler than this spec**, following the owner's brief ("not too many knobs"):
 > there is **no config file**; the only options are `--yes`, `--keep` and `--no-color`; the launch
-> mode, version retention (always one previous version) and update source are decided automatically;
-> files live in a visible `~/Applications` and the original download is moved.
+> mode, version retention (always one previous version), catalogue refresh (weekly, automatic) and
+> update source are decided automatically; files live in a visible `~/Applications` and the original
+> download is moved. There is no `sync` command: the catalogue refreshes itself.
 >
-> **Not built yet:** catalogue `sync`/`search`/`info` and install by name (§5.3, §5.7), pacman-style
-> syntax (§4.2), pre-release channels, pinning, `--no-sandbox` opt-in (doctor only explains),
-> sandbox profiles, delta updates, `scan`/`doctor --fix` (doctor reports; it never deletes),
-> double-click handler (FR-106).
+> **Not built:** pacman-style syntax (§4.2), pre-release channels, pinning, `--no-sandbox` opt-in
+> (doctor only explains), sandbox profiles, `scan`/`doctor --fix` (doctor reports; it never deletes).
 >
 > **Differences found while building:** reading an AppImage's `.desktop` file and icon runs its
 > runtime with `--appimage-extract` after the user confirms (a pure-Rust SquashFS reader was not
-> adopted, §8.2), with `unsquashfs` as the fallback when the runtime cannot start.
+> adopted, §8.2), with `unsquashfs` as the fallback when the runtime cannot start. The catalogue
+> carries no links or versions, so every candidate is checked against GitHub Releases first.
 
 ---
 

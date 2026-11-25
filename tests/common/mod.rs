@@ -94,6 +94,8 @@ pub struct Spec {
     pub electron: bool,
     pub update_info: Option<String>,
     pub needs_fuse2: bool,
+    /// Contents of `usr/share/metainfo/app.appdata.xml`, if any.
+    pub metainfo: Option<String>,
 }
 
 pub fn png(width: u32) -> Vec<u8> {
@@ -119,6 +121,7 @@ impl Spec {
             electron: false,
             update_info: None,
             needs_fuse2: false,
+            metainfo: None,
         }
     }
 }
@@ -165,6 +168,10 @@ impl System for MockSystem {
         if spec.app_run {
             std::fs::write(root.join("AppRun"), "#!/bin/sh\n")?;
         }
+        if let Some(m) = &spec.metainfo {
+            std::fs::create_dir_all(root.join("usr/share/metainfo"))?;
+            std::fs::write(root.join("usr/share/metainfo/app.appdata.xml"), m)?;
+        }
         if spec.electron {
             std::fs::create_dir_all(root.join("opt/app"))?;
             std::fs::write(root.join("opt/app/chrome-sandbox"), "x")?;
@@ -197,6 +204,10 @@ pub struct MockFetcher {
     pub tags: Mutex<HashMap<String, String>>,
     pub down: Mutex<Vec<String>>,
     pub calls: Mutex<Vec<String>>,
+    /// When set, `delta` fails (as if zsync were missing).
+    pub no_delta: Mutex<bool>,
+    /// When set, `delta` produces these (wrong) bytes instead of the real file.
+    pub corrupt_delta: Mutex<Option<Vec<u8>>>,
 }
 
 impl MockFetcher {
@@ -249,6 +260,30 @@ impl Fetcher for MockFetcher {
         std::fs::write(dest, bytes)?;
         Ok(())
     }
+    fn delta(&self, zsync_url: &str, seed: &Path, dest: &Path) -> Result<()> {
+        self.calls.lock().unwrap().push(format!(
+            "delta {zsync_url} seed={}",
+            seed.file_name().unwrap().to_string_lossy()
+        ));
+        if *self.no_delta.lock().unwrap() || !seed.exists() {
+            return Err(Error::NotFound("no zsync".into()));
+        }
+        // Behave like zsync: the result is the new release's file.
+        if let Some(bad) = self.corrupt_delta.lock().unwrap().clone() {
+            std::fs::write(dest, bad)?;
+            return Ok(());
+        }
+        let url = zsync_url.strip_suffix(".zsync").unwrap_or(zsync_url);
+        let bytes = self
+            .files
+            .lock()
+            .unwrap()
+            .get(url)
+            .cloned()
+            .ok_or_else(|| Error::NotFound("no such file".into()))?;
+        std::fs::write(dest, bytes)?;
+        Ok(())
+    }
     fn latest_tag(&self, repo: &str) -> Result<Option<String>> {
         self.calls.lock().unwrap().push(format!("tag {repo}"));
         if self.is_down(repo) {
@@ -287,6 +322,7 @@ impl Fixture {
             applications: h.join(".local/share/applications"),
             icons: h.join(".local/share/icons/hicolor"),
             state_file: h.join(".local/share/ifhai/state.toml"),
+            cache: h.join(".cache/ifhai"),
         };
         let host = Host {
             fuse2: true,

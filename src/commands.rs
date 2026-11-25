@@ -1,4 +1,5 @@
 use crate::appimage;
+use crate::catalogue;
 use crate::cli::{self, Command, HELP, Invocation, Opts};
 use crate::error::{Error, Result};
 use crate::fetch::Fetcher;
@@ -141,12 +142,14 @@ pub fn execute(env: &mut Env, inv: Invocation) -> Result<()> {
         Command::Updates => updates(env, &opts),
         Command::Update(n) => update(env, &opts, &n),
         Command::Rollback(n) => rollback(env, &opts, &n),
+        Command::Search(q) => search(env, &opts, &q),
         Command::Doctor => doctor(env, &opts),
     }
 }
 
 // ---- install ---------------------------------------------------------------------------------
 
+#[allow(clippy::large_enum_variant)] // a handful of short-lived values per run
 enum Job {
     Local {
         path: PathBuf,
@@ -160,6 +163,8 @@ enum Job {
         size: u64,
         expect: Option<String>,
         origin: Origin,
+        /// (zsync URL, the installed file to build from): used when `zsync` is installed.
+        delta: Option<(String, PathBuf)>,
     },
 }
 
@@ -187,6 +192,151 @@ fn safe_file_name(s: &str) -> Option<String> {
         && n.chars()
             .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c));
     (ok && n.to_lowercase().ends_with(".appimage")).then(|| n.to_string())
+}
+
+/// Let the user pick one of several equally good options. Never guesses: without a terminal this
+/// is an error that lists them.
+fn choose(env: &mut Env, head: &str, labels: &[String], tail: &str) -> Result<usize> {
+    let list: String = labels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("  {}. {l}\n", i + 1))
+        .collect();
+    if !env.io.interactive() {
+        return Err(Error::Ambiguous(format!("{head}\n\n{list}\n{tail}")));
+    }
+    env.io.out(&format!("{head}\n\n{list}\n"));
+    for _ in 0..3 {
+        let Some(ans) = env
+            .io
+            .ask(&format!("Choose one [1-{}, q to cancel]: ", labels.len()))
+        else {
+            break;
+        };
+        if ans.is_empty() || ans.eq_ignore_ascii_case("q") {
+            return Err(Error::Aborted);
+        }
+        if let Ok(n) = ans.parse::<usize>()
+            && (1..=labels.len()).contains(&n)
+        {
+            return Ok(n - 1);
+        }
+        env.io.out("Not a valid choice.\n");
+    }
+    Err(Error::Aborted)
+}
+
+/// Find an app by name in the catalogue. Every close candidate is checked against GitHub first:
+/// the catalogue is full of projects that stopped publishing, and none of those is offered.
+fn resolve_name(env: &mut Env, name: &str) -> Result<(String, String)> {
+    let (entries, note) = catalogue::load(env.fetcher, &env.dirs.cache)?;
+    if let Some(n) = note {
+        notes(env, &[n]);
+    }
+    let hits = catalogue::search(&entries, name);
+    let Some(&(top, _)) = hits.first() else {
+        return Err(Error::NotFound(format!(
+            "No app called '{name}' in the AppImage catalogue.\n\nTry: ifhai search {name}\nor install it from its GitHub page: ifhai install owner/repo"
+        )));
+    };
+    let tier: Vec<&catalogue::Entry> = hits
+        .iter()
+        .take_while(|(s, _)| *s == top)
+        .take(5)
+        .map(|(_, e)| *e)
+        .collect();
+    let mut alive: Vec<&catalogue::Entry> = Vec::new();
+    for e in &tier {
+        match github::latest_release(env.fetcher, &e.repo) {
+            Ok(rel) if !github::candidates(&rel.assets, &env.host.arch, None).is_empty() => {
+                alive.push(e)
+            }
+            Ok(_) | Err(Error::NotFound(_)) => {}
+            Err(other) => return Err(other),
+        }
+    }
+    match alive.as_slice() {
+        [] => Err(Error::NotFound(format!(
+            "{} is listed in the AppImage catalogue (github.com/{}), but its latest release has no AppImage for {} (it may have moved or stopped publishing).\n\nIf you know where it lives now: ifhai install owner/repo",
+            tier[0].name, tier[0].repo, env.host.arch
+        ))),
+        [one] => Ok((one.repo.clone(), one.name.clone())),
+        many => {
+            let labels: Vec<String> = many
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{} (github.com/{}){}",
+                        e.name,
+                        e.repo,
+                        if e.description.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", e.description)
+                        }
+                    )
+                })
+                .collect();
+            let i = choose(
+                env,
+                &format!("Several apps match '{name}':"),
+                &labels,
+                "Be more specific, or install one directly: ifhai install owner/repo",
+            )?;
+            Ok((many[i].repo.clone(), many[i].name.clone()))
+        }
+    }
+}
+
+fn classify_repo(env: &mut Env, repo: &str, label: Option<&str>) -> Result<Job> {
+    let rel = github::latest_release(env.fetcher, repo)?;
+    let asset: Asset = match github::select_asset(&rel.assets, &env.host.arch, None) {
+        Ok(a) => a.clone(),
+        Err(Error::Ambiguous(m)) => {
+            let c = github::candidates(&rel.assets, &env.host.arch, None);
+            if !env.io.interactive() {
+                return Err(Error::Ambiguous(format!(
+                    "{m}\n\nInstall the one you want by its download URL (right-click the file on the release page)."
+                )));
+            }
+            let names: Vec<String> = c.iter().map(|a| a.name.clone()).collect();
+            let i = choose(
+                env,
+                "This release has several AppImages that could be the right one:",
+                &names,
+                "",
+            )?;
+            c[i].clone()
+        }
+        Err(e) => return Err(e),
+    };
+    let expect = github::expected_sha256(env.fetcher, &asset, &rel.assets)?;
+    let file_name = safe_file_name(&asset.name).ok_or_else(|| {
+        Error::Failed(format!(
+            "The release file name '{}' is not one ifhai will use.",
+            asset.name
+        ))
+    })?;
+    let (n, _) = appimage::name_and_version(&file_name);
+    let v = version::display(&rel.tag_name).to_string();
+    Ok(Job::Remote {
+        title: format!("{} {v}", label.unwrap_or(&n)),
+        from: format!("github.com/{repo} {}", rel.tag_name),
+        url: asset.browser_download_url.clone(),
+        file_name,
+        size: asset.size,
+        expect,
+        origin: Origin {
+            source: Some(Source {
+                repo: repo.to_string(),
+                pattern: github::pattern_from_asset(&asset.name, &rel.tag_name),
+            }),
+            tag: Some(rel.tag_name.clone()),
+            version_hint: Some(v),
+            ..Origin::default()
+        },
+        delta: None,
+    })
 }
 
 fn classify(env: &mut Env, target: &str) -> Result<Job> {
@@ -225,37 +375,17 @@ fn classify(env: &mut Env, target: &str) -> Result<Job> {
             size: 0,
             expect: None,
             origin: Origin::default(),
+            delta: None,
         });
     }
     if looks_like_repo(target) {
-        let rel = github::latest_release(env.fetcher, target)?;
-        let asset: &Asset = github::select_asset(&rel.assets, &env.host.arch, None)?;
-        let expect = github::expected_sha256(env.fetcher, asset, &rel.assets)?;
-        let file_name = safe_file_name(&asset.name).ok_or_else(|| {
-            Error::Failed(format!(
-                "The release file name '{}' is not one ifhai will use.",
-                asset.name
-            ))
-        })?;
-        let (n, _) = appimage::name_and_version(&file_name);
-        let v = version::display(&rel.tag_name).to_string();
-        return Ok(Job::Remote {
-            title: format!("{n} {v}"),
-            from: format!("github.com/{target} {}", rel.tag_name),
-            url: asset.browser_download_url.clone(),
-            file_name,
-            size: asset.size,
-            expect,
-            origin: Origin {
-                source: Some(Source {
-                    repo: target.to_string(),
-                    pattern: github::pattern_from_asset(&asset.name, &rel.tag_name),
-                }),
-                tag: Some(rel.tag_name.clone()),
-                version_hint: Some(v),
-                ..Origin::default()
-            },
-        });
+        return classify_repo(env, target, None);
+    }
+    let looks_like_file =
+        target.to_lowercase().ends_with(".appimage") || target.contains(['/', '\\']);
+    if !looks_like_file && !target.starts_with('-') && target.len() <= 100 {
+        let (repo, name) = resolve_name(env, target)?;
+        return classify_repo(env, &repo, Some(&name));
     }
     Err(Error::NotFound(format!(
         "There is no file called '{target}', and it is not an owner/repo or an https:// link either."
@@ -411,6 +541,7 @@ fn download_and_install(
             file_name,
             expect,
             origin,
+            delta,
             ..
         } => {
             std::fs::create_dir_all(&env.dirs.support)?;
@@ -418,7 +549,23 @@ fn download_and_install(
             std::fs::create_dir_all(&dir)?;
             let file = dir.join(file_name);
             let result = (|| {
-                env.fetcher.file(url, &file)?;
+                // An update with a zsync file downloads only what changed, when zsync is installed. Any
+                // problem simply means a normal download: the checksum below still decides.
+                let mut by_delta = delta.as_ref().is_some_and(|(z, seed)| {
+                    seed.exists() && env.fetcher.delta(z, seed, &file).is_ok() && file.exists()
+                });
+                // A delta result that does not match the published checksum is thrown away and
+                // replaced by a normal download rather than failing the update.
+                if by_delta
+                    && let Some(want) = expect
+                    && install::sha256_file(&file).ok().as_ref() != Some(want)
+                {
+                    by_delta = false;
+                }
+                if !by_delta {
+                    let _ = std::fs::remove_file(&file);
+                    env.fetcher.file(url, &file)?;
+                }
                 let mut origin = origin.clone();
                 if let Some(want) = expect {
                     let got = install::sha256_file(&file)?;
@@ -542,6 +689,67 @@ fn install(env: &mut Env, opts: &Opts, targets: &[String]) -> Result<()> {
             failed.len()
         ))
     })
+}
+
+fn search(env: &mut Env, opts: &Opts, query: &str) -> Result<()> {
+    let st = out_style(env, opts.no_color);
+    let (entries, note) = catalogue::load(env.fetcher, &env.dirs.cache)?;
+    if let Some(n) = note {
+        notes(env, &[n]);
+    }
+    let hits = catalogue::search(&entries, query);
+    if hits.is_empty() {
+        return Err(Error::NotFound(format!(
+            "Nothing in the AppImage catalogue matches '{query}'."
+        )));
+    }
+    let shown = &hits[..hits.len().min(15)];
+    let clip = |s: &str| {
+        if s.chars().count() > 60 {
+            format!("{}…", s.chars().take(59).collect::<String>())
+        } else {
+            s.to_string()
+        }
+    };
+    let rows: Vec<Vec<String>> = shown
+        .iter()
+        .map(|(_, e)| {
+            vec![
+                e.name.clone(),
+                format!("github.com/{}", e.repo),
+                clip(&e.description),
+            ]
+        })
+        .collect();
+    let pretty = env.io.stdout_is_tty();
+    env.io.out(&output::table(
+        &["App", "From", "About"],
+        &rows,
+        pretty,
+        st,
+        &|c, s| match c {
+            0 => st.bold(s),
+            1 => st.accent(s),
+            _ => st.dim(s),
+        },
+    ));
+    if hits.len() > shown.len() {
+        env.io.out(&format!(
+            "{}\n",
+            st.dim(&format!(
+                "Showing {} of {}. Narrow the search to see others.",
+                shown.len(),
+                hits.len()
+            ))
+        ));
+    }
+    if pretty {
+        env.io.out(&format!(
+            "{}\n",
+            st.dim("Install one with: ifhai install <name>")
+        ));
+    }
+    Ok(())
 }
 
 // ---- remove / list / run ------------------------------------------------------------------------
@@ -668,6 +876,59 @@ fn run_app(env: &mut Env, name: &str, args: &[String]) -> Result<()> {
 
 // ---- updates ------------------------------------------------------------------------------------
 
+/// Turn the repos named in an app's own metadata into a real update source, but only when the repo's
+/// latest release contains a file matching what was installed. Each app is tried at most once.
+fn discover_sources(env: &mut Env, state: &mut State) -> bool {
+    let slugs: Vec<String> = state
+        .apps
+        .iter()
+        .filter(|(_, a)| a.source.is_none() && !a.hints.is_empty() && !a.hints_tried)
+        .map(|(k, _)| k.clone())
+        .collect();
+    let mut changed = false;
+    for slug in slugs {
+        let app = state.apps[&slug].clone();
+        let (mut found, mut network_trouble) = (None, false);
+        for hint in &app.hints {
+            match github::latest_release(env.fetcher, hint) {
+                Ok(rel) => {
+                    if let Some(pattern) = github::verify_hint(
+                        &rel.assets,
+                        &env.host.arch,
+                        &app.origin_name,
+                        &app.version,
+                    ) {
+                        found = Some(Source {
+                            repo: hint.clone(),
+                            pattern,
+                        });
+                        break;
+                    }
+                }
+                Err(Error::NotFound(_)) => {}
+                Err(_) => {
+                    network_trouble = true;
+                    break;
+                }
+            }
+        }
+        if let Some(a) = state.apps.get_mut(&slug) {
+            match found {
+                Some(s) => {
+                    a.source = Some(s);
+                    changed = true;
+                }
+                None if !network_trouble => {
+                    a.hints_tried = true; // do not spend an API call on this again
+                    changed = true;
+                }
+                None => {}
+            }
+        }
+    }
+    changed
+}
+
 struct Check {
     app: App,
     latest: Result<Option<String>>,
@@ -727,10 +988,13 @@ fn check(env: &mut Env, apps: Vec<App>) -> Vec<Check> {
 
 fn updates(env: &mut Env, opts: &Opts) -> Result<()> {
     let st = out_style(env, opts.no_color);
-    let state = State::load(&env.dirs.state_file)?;
+    let mut state = State::load(&env.dirs.state_file)?;
     if state.apps.is_empty() {
         env.io.err("Nothing installed yet.\n");
         return Ok(());
+    }
+    if discover_sources(env, &mut state) {
+        state.save(&env.dirs.state_file)?;
     }
     let checks = check(env, state.apps.values().cloned().collect());
     let rows: Vec<Vec<String>> = state
@@ -796,6 +1060,9 @@ fn updates(env: &mut Env, opts: &Opts) -> Result<()> {
 fn update(env: &mut Env, opts: &Opts, names: &[String]) -> Result<()> {
     let st = out_style(env, opts.no_color);
     let mut state = State::load(&env.dirs.state_file)?;
+    if discover_sources(env, &mut state) {
+        state.save(&env.dirs.state_file)?;
+    }
     let mut chosen: Vec<App> = Vec::new();
     if names.is_empty() {
         chosen = state.apps.values().cloned().collect();
@@ -947,6 +1214,12 @@ fn update(env: &mut Env, opts: &Opts, names: &[String]) -> Result<()> {
             file_name,
             size: p.asset.size,
             expect: p.expect.clone(),
+            delta: p
+                .release
+                .assets
+                .iter()
+                .find(|z| z.name == format!("{}.zsync", p.asset.name))
+                .map(|z| (z.browser_download_url.clone(), p.app.file.clone())),
             origin: Origin {
                 source: Some(Source {
                     repo: p

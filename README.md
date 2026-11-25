@@ -42,7 +42,8 @@ Or build it: `cargo install --git https://github.com/Disc0wd/ifhai`.
 
 | Command | What it does |
 |:---|:---|
-| `ifhai install <file>...` | Install AppImage files. Also takes `owner/repo` (latest GitHub release) or an `https://` link |
+| `ifhai install <app>...` | Install an AppImage file, **an app name** (`ifhai install obsidian`), `owner/repo` (latest GitHub release) or an `https://` link |
+| `ifhai search <text>` | Find an app by name in the AppImage catalogue |
 | `ifhai remove <app>...` | Remove an app completely. Its own settings and data are not touched |
 | `ifhai list` | Installed apps |
 | `ifhai run <app> [args]` | Start an app (everything after the name is passed to it) |
@@ -82,6 +83,21 @@ required (use `--yes` when not on a terminal), `6` cancelled.
   update information or was installed with `owner/repo`.)
 - **Download progress.** Big downloads show a progress bar on a terminal; update checks run in
   parallel.
+- **Install by name.** `ifhai install obsidian` looks the app up in the AppImageHub catalogue (kept
+  in a local cache and refreshed weekly), checks the real GitHub release before offering anything
+  (about 15% of catalogue entries no longer publish an AppImage, and those are never offered),
+  verifies the download, and remembers where it came from. If several apps match equally, it asks.
+- **More apps update on their own.** Besides embedded update information and the download URL a
+  browser records, ifhai reads the GitHub repos named in an app's own metadata and uses one as the
+  update source only after its latest release is verified to contain a file matching what you
+  installed. A repo that merely looks related is rejected, and each app is tried once. Installing a
+  newer file of an app you already follow keeps following the same place.
+- **Asks when a release has several candidates** (say a normal and a `-legacy` build) instead of
+  giving up, and remembers the choice for updates.
+- **Delta updates.** If `zsync` is installed and the release publishes a `.zsync` file, an update
+  downloads only what changed. The result is checked against the published checksum, and anything
+  wrong falls back to a normal download. (Not exercised against a real `zsync` yet: this machine
+  does not have it, so it is covered by tests with a stand-in only.)
 - **Exact removal.** Everything ifhai creates for an app is recorded. Removal deletes exactly that,
   and refuses any path outside ifhai's own folders, even if the record is damaged.
 
@@ -125,16 +141,15 @@ both take milliseconds.
 cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-81 tests: ELF/AppImage parsing against hostile input, `.desktop` rewriting, asset selection and
+103 tests: ELF/AppImage parsing against hostile input, `.desktop` rewriting, asset selection and
 checksums, and every command end to end (fake AppImages, mock network and system, plus a test that
 installs under every failure mode and checks nothing is left behind). Tests never touch your real
 home directory or the network.
 
 ## Not in this version
 
-- Searching a catalogue and installing by name (`ifhai install obsidian`): install from a file,
-  `owner/repo` or a link for now. See [spec.md](spec.md).
-- Updates for apps that have no GitHub source. Say so, rather than guess.
+- Updates for an app that names no GitHub repo, was not installed from one, and came from a browser
+  that does not record the download URL (Firefox). ifhai says so rather than guess.
 - Sandboxing. `doctor` explains Electron sandbox problems; it never turns a sandbox off for you.
 - Release binaries are built for x86_64.
 - A licence file has not been chosen yet.

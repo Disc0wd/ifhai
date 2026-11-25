@@ -1290,3 +1290,474 @@ fn update_checks_run_side_by_side_and_keep_their_order() {
         io.out
     );
 }
+
+// ---- by name: the catalogue ------------------------------------------------------------------------
+
+fn feed(f: &Fixture, items: &[(&str, &str, &str)]) {
+    let js: Vec<String> = items
+        .iter()
+        .map(|(n, repo, d)| format!(r#"{{"name":"{n}","description":"{d}","links":[{{"type":"GitHub","url":"{repo}"}}]}}"#))
+        .collect();
+    f.fetcher.texts.lock().unwrap().insert(
+        ifhai::catalogue::FEED_URL.into(),
+        format!(r#"{{"version":"1","items":[{}]}}"#, js.join(",")),
+    );
+}
+
+fn publish_app(f: &Fixture, repo: &str, name: &str, tag: &str, v: &str) {
+    let spec = Spec::new(&format!("{name}-{v}-x86_64.AppImage"), name);
+    let bytes = f.bytes_of(&spec);
+    f.release(repo, tag, &[(spec.file_name.as_str(), bytes)], true);
+}
+
+#[test]
+fn an_app_is_installed_by_its_plain_name() {
+    let f = Fixture::new();
+    feed(
+        &f,
+        &[
+            ("Krita", "KDE/krita", "Digital painting"),
+            ("Obsidian", "obsidianmd/obsidian-releases", "Notes"),
+        ],
+    );
+    publish_app(&f, "KDE/krita", "Krita", "v5.2.0", "5.2.0");
+    let mut io = TestIo::answering(&["y"]);
+    assert_eq!(f.run(&mut io, &["install", "krita"]), 0, "{}", io.err);
+    assert!(
+        io.out.contains("Krita 5.2.0")
+            && io.out.contains("github.com/KDE/krita v5.2.0")
+            && io.out.contains("SHA-256 verified"),
+        "{}",
+        io.out
+    );
+    let a = &f.state().apps["krita"];
+    assert_eq!(a.source.as_ref().unwrap().repo, "KDE/krita");
+    assert_eq!(f.fetcher.fetches("tag "), 0);
+}
+
+#[test]
+fn the_exact_name_wins_over_longer_names() {
+    let f = Fixture::new();
+    feed(
+        &f,
+        &[
+            ("Krita Next", "KDE/krita-next", "Nightly"),
+            ("Krita", "KDE/krita", "Painting"),
+        ],
+    );
+    publish_app(&f, "KDE/krita", "Krita", "v5", "5");
+    publish_app(&f, "KDE/krita-next", "KritaNext", "v6", "6");
+    let (code, io) = f.yes(&["install", "Krita"]);
+    assert_eq!(code, 0, "no needless question: {}", io.err);
+    assert_eq!(
+        f.state().apps["krita"].source.as_ref().unwrap().repo,
+        "KDE/krita"
+    );
+}
+
+#[test]
+fn dead_catalogue_entries_are_never_offered() {
+    let f = Fixture::new();
+    feed(
+        &f,
+        &[
+            ("Notes", "dead/notes", "Old"),
+            ("Notes", "alive/notes", "New"),
+        ],
+    );
+    f.release(
+        "dead/notes",
+        "v1",
+        &[("source.tar.gz", b"x".to_vec())],
+        false,
+    ); // no AppImage any more
+    publish_app(&f, "alive/notes", "Notes", "v2", "2");
+    let (code, io) = f.yes(&["install", "notes"]);
+    assert_eq!(code, 0, "the dead twin is skipped silently: {}", io.err);
+    assert_eq!(
+        f.state().apps["notes"].source.as_ref().unwrap().repo,
+        "alive/notes"
+    );
+}
+
+#[test]
+fn a_listed_but_dead_app_says_exactly_that() {
+    let f = Fixture::new();
+    feed(&f, &[("Ghost", "gone/ghost", "")]);
+    f.release(
+        "gone/ghost",
+        "v1",
+        &[("source.tar.gz", b"x".to_vec())],
+        false,
+    );
+    let (code, io) = f.yes(&["install", "ghost"]);
+    assert_eq!(code, 3);
+    assert!(
+        io.err
+            .contains("Ghost is listed in the AppImage catalogue (github.com/gone/ghost)")
+            && io.err.contains("no AppImage for x86_64")
+            && io.err.contains("ifhai install owner/repo"),
+        "{}",
+        io.err
+    );
+    let (code, io) = f.yes(&["install", "no-such-thing"]);
+    assert_eq!(code, 3);
+    assert!(
+        io.err.contains("No app called 'no-such-thing'") && io.err.contains("ifhai search"),
+        "{}",
+        io.err
+    );
+}
+
+#[test]
+fn equally_good_matches_are_asked_about_never_guessed() {
+    let f = Fixture::new();
+    feed(
+        &f,
+        &[
+            ("Notes", "a/notes", "First"),
+            ("Notes", "b/notes", "Second"),
+        ],
+    );
+    publish_app(&f, "a/notes", "Notes", "v1", "1");
+    publish_app(&f, "b/notes", "Notes", "v1", "1");
+    let (code, io) = f.yes(&["install", "notes"]);
+    assert_eq!(code, 4);
+    assert!(
+        io.err.contains("1. Notes (github.com/a/notes)")
+            && io.err.contains("2. Notes (github.com/b/notes)")
+            && io.err.contains("owner/repo"),
+        "{}",
+        io.err
+    );
+    assert!(f.state().apps.is_empty());
+    let mut io = TestIo::answering(&["2", "y"]);
+    assert_eq!(f.run(&mut io, &["install", "notes"]), 0, "{}", io.err);
+    assert_eq!(
+        f.state().apps["notes"].source.as_ref().unwrap().repo,
+        "b/notes"
+    );
+    let f2 = Fixture::new();
+    feed(&f2, &[("Notes", "a/notes", ""), ("Notes", "b/notes", "")]);
+    publish_app(&f2, "a/notes", "Notes", "v1", "1");
+    publish_app(&f2, "b/notes", "Notes", "v1", "1");
+    let mut io = TestIo::answering(&["q"]);
+    assert_eq!(f2.run(&mut io, &["install", "notes"]), 6);
+}
+
+#[test]
+fn file_like_arguments_never_touch_the_catalogue() {
+    let f = Fixture::new();
+    for t in ["missing.AppImage", "some/dir/thing"] {
+        let (code, _) = f.yes(&["install", t]);
+        assert_ne!(code, 0, "{t}");
+    }
+    assert_eq!(
+        f.fetcher.fetches("appimage.github.io"),
+        0,
+        "no network for something that is plainly a path"
+    );
+}
+
+#[test]
+fn search_lists_matches_with_their_source() {
+    let f = Fixture::new();
+    feed(
+        &f,
+        &[
+            ("Krita", "KDE/krita", "Digital painting"),
+            ("Pinta", "o/pinta", "Image editor like krita"),
+            ("Obsidian", "x/obs", "Notes"),
+        ],
+    );
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["search", "krita"]), 0, "{}", io.err);
+    assert_eq!(
+        io.out,
+        "Krita\tgithub.com/KDE/krita\tDigital painting\nPinta\tgithub.com/o/pinta\tImage editor like krita\n"
+    );
+    let mut io = TestIo::term(&[]);
+    f.run(&mut io, &["search", "krita"]);
+    assert!(
+        strip(&io.out).starts_with("App")
+            && strip(&io.out).contains("Install one with: ifhai install <name>"),
+        "{}",
+        io.out
+    );
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["search", "zzzz"]), 3);
+}
+
+#[test]
+fn the_catalogue_is_cached_survives_being_offline_and_ignores_garbage() {
+    let f = Fixture::new();
+    feed(&f, &[("Krita", "KDE/krita", "")]);
+    f.run(&mut TestIo::non_interactive(), &["search", "krita"]);
+    f.run(&mut TestIo::non_interactive(), &["search", "krita"]);
+    assert_eq!(
+        f.fetcher.fetches("appimage.github.io"),
+        1,
+        "second use reads the cache"
+    );
+    assert!(f.dirs.cache.join("catalogue.json").exists());
+    // Stale + offline: the old copy is used, with a warning.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 3600);
+    std::fs::File::options()
+        .write(true)
+        .open(f.dirs.cache.join("catalogue.json"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    f.fetcher
+        .down
+        .lock()
+        .unwrap()
+        .push("appimage.github.io".into());
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["search", "krita"]), 0, "{}", io.err);
+    assert!(
+        io.err.contains("Could not refresh the app catalogue") && io.out.contains("Krita"),
+        "{} / {}",
+        io.err,
+        io.out
+    );
+    // No cache at all and offline: a clear error that points at the other ways in.
+    let g = Fixture::new();
+    g.fetcher
+        .down
+        .lock()
+        .unwrap()
+        .push("appimage.github.io".into());
+    let mut io = TestIo::non_interactive();
+    assert_eq!(g.run(&mut io, &["search", "krita"]), 1);
+    assert!(
+        io.err.contains("apps cannot be found by name") && io.err.contains("owner/repo"),
+        "{}",
+        io.err
+    );
+    // A captive portal's HTML is neither trusted nor cached.
+    let h = Fixture::new();
+    h.fetcher.texts.lock().unwrap().insert(
+        ifhai::catalogue::FEED_URL.into(),
+        "<html>log in</html>".into(),
+    );
+    assert_eq!(
+        h.run(&mut TestIo::non_interactive(), &["search", "krita"]),
+        1
+    );
+    assert!(!h.dirs.cache.join("catalogue.json").exists());
+}
+
+// ---- several candidates, asked about ----------------------------------------------------------------
+
+#[test]
+fn a_release_with_several_candidates_lets_you_choose_and_remembers_the_choice() {
+    let f = Fixture::new();
+    let a = Spec::new("App-1.0-x86_64.AppImage", "App");
+    let b = Spec::new("App-1.0-legacy-x86_64.AppImage", "App");
+    let (ab, bb) = (f.bytes_of(&a), f.bytes_of(&b));
+    f.release(
+        "o/app",
+        "v1.0",
+        &[(a.file_name.as_str(), ab), (b.file_name.as_str(), bb)],
+        true,
+    );
+    let mut io = TestIo::answering(&["2", "y"]);
+    assert_eq!(f.run(&mut io, &["install", "o/app"]), 0, "{}", io.err);
+    assert!(
+        io.out.contains("1. App-1.0-legacy-x86_64.AppImage")
+            || io.out.contains("2. App-1.0-legacy-x86_64.AppImage"),
+        "{}",
+        io.out
+    );
+    let s = f.state().apps["app"].source.clone().unwrap();
+    assert!(
+        ifhai::appimage::glob(&s.pattern, "App-2.0-legacy-x86_64.AppImage"),
+        "the pattern keeps the legacy variant: {}",
+        s.pattern
+    );
+    assert!(!ifhai::appimage::glob(
+        &s.pattern,
+        "App-2.0-x86_64.AppImage"
+    ));
+}
+
+// ---- update sources: found, verified, inherited ----------------------------------------------------------
+
+fn with_hint(name: &str, file: &str, repo: &str) -> Spec {
+    let mut s = Spec::new(file, name);
+    s.metainfo = Some(format!(
+        "<component><url type=\"homepage\">https://github.com/{repo}</url><url type=\"bugtracker\">https://github.com/{repo}/issues</url></component>"
+    ));
+    s
+}
+
+#[test]
+fn a_repo_named_in_the_metadata_becomes_the_update_source_only_after_it_checks_out() {
+    let f = Fixture::new();
+    let src = f.download(&with_hint(
+        "Kdenlive",
+        "Kdenlive-1.0-x86_64.AppImage",
+        "KDE/kdenlive",
+    ));
+    f.yes(&["install", src.to_str().unwrap()]);
+    let a = f.state().apps["kdenlive"].clone();
+    assert_eq!(
+        a.hints,
+        vec!["KDE/kdenlive"],
+        "the repo is remembered as a hint only"
+    );
+    assert!(a.source.is_none() && !a.hints_tried);
+    publish(&f, "KDE/kdenlive", "v2.0", "2.0", true);
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["updates"]), 0, "{}", io.err);
+    assert_eq!(
+        io.out, "Kdenlive\t1.0\t2.0\tupdate available\n",
+        "found and verified in one go"
+    );
+    assert_eq!(
+        f.state().apps["kdenlive"].source.as_ref().unwrap().pattern,
+        "Kdenlive-*-x86_64.AppImage"
+    );
+    let (code, _) = f.yes(&["update"]);
+    assert_eq!(code, 0);
+    assert_eq!(f.state().apps["kdenlive"].version, "2.0");
+}
+
+#[test]
+fn a_hint_that_does_not_match_is_rejected_and_never_retried() {
+    let f = Fixture::new();
+    let src = f.download(&with_hint(
+        "Kdenlive",
+        "Kdenlive-1.0-x86_64.AppImage",
+        "someone/fork",
+    ));
+    f.yes(&["install", src.to_str().unwrap()]);
+    publish_app(&f, "someone/fork", "TotallyDifferent", "v9", "9");
+    let mut io = TestIo::non_interactive();
+    f.run(&mut io, &["updates"]);
+    assert_eq!(io.out, "Kdenlive\t1.0\t-\tno update source\n");
+    let a = &f.state().apps["kdenlive"];
+    assert!(a.source.is_none() && a.hints_tried, "tried once, rejected");
+    let calls = f.fetcher.fetches("api.github.com");
+    f.run(&mut TestIo::non_interactive(), &["updates"]);
+    assert_eq!(
+        f.fetcher.fetches("api.github.com"),
+        calls,
+        "no further API calls for this app"
+    );
+}
+
+#[test]
+fn network_trouble_does_not_burn_the_one_attempt() {
+    let f = Fixture::new();
+    let src = f.download(&with_hint(
+        "Kdenlive",
+        "Kdenlive-1.0-x86_64.AppImage",
+        "KDE/kdenlive",
+    ));
+    f.yes(&["install", src.to_str().unwrap()]);
+    f.fetcher.down.lock().unwrap().push("KDE/kdenlive".into());
+    f.run(&mut TestIo::non_interactive(), &["updates"]);
+    assert!(
+        !f.state().apps["kdenlive"].hints_tried,
+        "offline is not a verdict"
+    );
+}
+
+#[test]
+fn a_newer_local_file_keeps_following_the_same_source() {
+    let f = Fixture::new();
+    publish(&f, "KDE/kdenlive", "v1.0", "1.0", true);
+    f.yes(&["install", "KDE/kdenlive"]);
+    let newer = f.download(&Spec::new("Kdenlive-1.5-x86_64.AppImage", "Kdenlive"));
+    f.yes(&["install", newer.to_str().unwrap()]);
+    let a = &f.state().apps["kdenlive"];
+    assert_eq!(a.version, "1.5");
+    assert_eq!(
+        a.source.as_ref().unwrap().repo,
+        "KDE/kdenlive",
+        "the update source survives installing a file by hand"
+    );
+}
+
+// ---- delta updates ----------------------------------------------------------------------------------------
+
+fn publish_with_zsync(f: &Fixture, tag: &str, v: &str) {
+    let spec = Spec::new(&format!("Kdenlive-{v}-x86_64.AppImage"), "Kdenlive");
+    let bytes = f.bytes_of(&spec);
+    let z = format!("{}.zsync", spec.file_name);
+    f.release(
+        "KDE/kdenlive",
+        tag,
+        &[
+            (spec.file_name.as_str(), bytes),
+            (z.as_str(), b"zsync-control-file".to_vec()),
+        ],
+        true,
+    );
+}
+
+#[test]
+fn an_update_with_a_zsync_file_downloads_only_the_difference() {
+    let f = Fixture::new();
+    publish_with_zsync(&f, "v1.0", "1.0");
+    f.yes(&["install", "KDE/kdenlive"]);
+    publish_with_zsync(&f, "v2.0", "2.0");
+    let before = f.fetcher.fetches(
+        "file https://github.com/KDE/kdenlive/releases/download/v2.0/Kdenlive-2.0-x86_64.AppImage",
+    );
+    let (code, io) = f.yes(&["update"]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert_eq!(f.fetcher.fetches("delta https://github.com/KDE/kdenlive/releases/download/v2.0/Kdenlive-2.0-x86_64.AppImage.zsync seed=kdenlive.AppImage"), 1, "built from the installed file");
+    assert_eq!(f.fetcher.fetches("file https://github.com/KDE/kdenlive/releases/download/v2.0/Kdenlive-2.0-x86_64.AppImage"), before, "no full download");
+    assert_eq!(f.state().apps["kdenlive"].version, "2.0");
+}
+
+#[test]
+fn without_zsync_or_when_it_fails_the_update_is_a_normal_download() {
+    let f = Fixture::new();
+    publish_with_zsync(&f, "v1.0", "1.0");
+    f.yes(&["install", "KDE/kdenlive"]);
+    publish_with_zsync(&f, "v2.0", "2.0");
+    *f.fetcher.no_delta.lock().unwrap() = true;
+    let (code, io) = f.yes(&["update"]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert_eq!(f.state().apps["kdenlive"].version, "2.0");
+    assert_eq!(f.fetcher.fetches("file https://github.com/KDE/kdenlive/releases/download/v2.0/Kdenlive-2.0-x86_64.AppImage"), 1);
+}
+
+#[test]
+fn a_delta_result_that_fails_its_checksum_is_replaced_by_a_full_download() {
+    let f = Fixture::new();
+    publish_with_zsync(&f, "v1.0", "1.0");
+    f.yes(&["install", "KDE/kdenlive"]);
+    publish_with_zsync(&f, "v2.0", "2.0");
+    *f.fetcher.corrupt_delta.lock().unwrap() = Some(b"not the real file".to_vec());
+    let (code, io) = f.yes(&["update"]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert_eq!(f.state().apps["kdenlive"].version, "2.0");
+    let installed = std::fs::read(f.dirs.apps.join("kdenlive.AppImage")).unwrap();
+    assert_ne!(
+        installed, b"not the real file",
+        "the corrupt delta output was never installed"
+    );
+    assert_eq!(f.fetcher.fetches("file https://github.com/KDE/kdenlive/releases/download/v2.0/Kdenlive-2.0-x86_64.AppImage"), 1, "fell back to the full file");
+}
+
+#[test]
+fn a_cache_from_an_older_format_is_refetched_not_misread() {
+    let f = Fixture::new();
+    feed(&f, &[("Krita", "KDE/krita", "")]);
+    std::fs::create_dir_all(&f.dirs.cache).unwrap();
+    // What the first version wrote: a bare array, with markup left in the text.
+    std::fs::write(
+        f.dirs.cache.join("catalogue.json"),
+        r#"[{"name":"Old","description":"<p>x</p>","repo":"o/old"}]"#,
+    )
+    .unwrap();
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["search", "krita"]), 0, "{}", io.err);
+    assert_eq!(f.fetcher.fetches("appimage.github.io"), 1, "refetched");
+    assert!(io.out.contains("Krita") && !io.out.contains("Old"));
+}

@@ -1,4 +1,5 @@
 pub mod appimage;
+pub mod catalogue;
 pub mod cli;
 pub mod commands;
 pub mod desktop;

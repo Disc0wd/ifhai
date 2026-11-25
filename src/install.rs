@@ -178,6 +178,45 @@ fn find_icon(root: &Path, name: Option<&str>) -> Option<(PathBuf, String)> {
     found.pop().map(|(_, p, e)| (p, e))
 }
 
+/// GitHub repos mentioned in the app's AppStream metadata (homepage, vcs-browser...). Hints only.
+fn find_hints(root: &Path) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for dir in ["usr/share/metainfo", "usr/share/appdata"] {
+        let Ok(rd) = std::fs::read_dir(root.join(dir)) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "xml") {
+                continue;
+            }
+            let Some(real) = inside(root, &p) else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(real) else {
+                continue;
+            };
+            for chunk in text.split("https://github.com/").skip(1).take(40) {
+                let path: String = chunk
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || "-_./".contains(*c))
+                    .collect();
+                let mut seg = path.split('/');
+                if let (Some(o), Some(r)) = (seg.next(), seg.next()) {
+                    let r = r.trim_end_matches(".git");
+                    let ok = |s: &str| !s.is_empty() && s != "." && s != ".." && s.len() <= 100;
+                    let repo = format!("{o}/{r}");
+                    if ok(o) && ok(r) && !found.contains(&repo) {
+                        found.push(repo);
+                    }
+                }
+            }
+        }
+    }
+    found.truncate(5);
+    found
+}
+
 /// Does the app bundle Electron's sandbox helper? (Looked for near the top of the tree.)
 fn is_electron(root: &Path) -> bool {
     fn walk(d: &Path, depth: u32) -> bool {
@@ -341,17 +380,25 @@ pub fn install_file(
         version: version.clone(),
         tag: origin.tag.clone(),
         mode: mode.into(),
-        source: origin.source.clone().or_else(|| {
-            info.update_info
-                .as_deref()
-                .and_then(appimage::github_source)
-                .map(|g| Source {
-                    repo: g.repo,
-                    pattern: g.pattern,
-                })
-        }),
+        source: origin
+            .source
+            .clone()
+            .or_else(|| {
+                info.update_info
+                    .as_deref()
+                    .and_then(appimage::github_source)
+                    .map(|g| Source {
+                        repo: g.repo,
+                        pattern: g.pattern,
+                    })
+            })
+            // a newer file of an app we already follow keeps following the same place
+            .or_else(|| existing.as_ref().and_then(|o| o.source.clone())),
         sha256: sha.clone(),
         electron: is_electron(&root),
+        hints: find_hints(&root),
+        hints_tried: false,
+        origin_name: file_name.clone(),
         installed_at: now_secs(),
         previous: existing.as_ref().map(|o| Previous {
             version: o.version.clone(),

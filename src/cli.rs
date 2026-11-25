@@ -9,6 +9,7 @@ pub enum Command {
     Update(Vec<String>),
     Updates,
     Rollback(String),
+    Search(String),
     Doctor,
     Help,
     Version,
@@ -105,6 +106,9 @@ pub fn parse(args: &[String]) -> Result<Invocation> {
         )?),
         Some("remove") => Command::Remove(need("remove", targets, "an app name")?),
         Some("update") => Command::Update(targets),
+        Some("search") => {
+            Command::Search(need("search", targets, "something to look for")?.join(" "))
+        }
         Some("rollback") => match targets.as_slice() {
             [one] => Command::Rollback(one.clone()),
             _ => return usage("'rollback' needs exactly one app name."),
@@ -140,7 +144,8 @@ It makes the file executable, moves it to ~/Applications, adds it to your
 app menu with its icon, adds a command for it, and sorts out FUSE.
 
 COMMANDS
-  install <file>...   Install AppImage files (also: owner/repo, or an https:// link)
+  install <file>...   Install AppImage files (also: an app name, owner/repo, or an https:// link)
+  search <text>       Find an app by name in the AppImage catalogue
   remove <app>...     Remove an app completely (its own settings are kept)
   list                Show installed apps
   run <app> [args]    Start an app
@@ -184,6 +189,10 @@ mod tests {
             Command::Rollback("foo".into())
         );
         assert_eq!(p("doctor").unwrap().cmd, Command::Doctor);
+        assert_eq!(
+            p("search web browser").unwrap().cmd,
+            Command::Search("web browser".into())
+        );
         assert_eq!(p("").unwrap().cmd, Command::Help);
         assert_eq!(p("-V").unwrap().cmd, Command::Version);
         assert_eq!(p("install x -h").unwrap().cmd, Command::Help);

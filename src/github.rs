@@ -69,6 +69,36 @@ pub fn select_asset<'a>(
     arch: &str,
     pattern: Option<&str>,
 ) -> Result<&'a Asset> {
+    let pool = candidates(assets, arch, pattern);
+    match pool.as_slice() {
+        [one] => Ok(one),
+        [] => Err(Error::NotFound(format!(
+            "This release has no AppImage for {arch}.{}",
+            {
+                let all: Vec<&str> = assets
+                    .iter()
+                    .filter(|a| a.name.to_lowercase().ends_with(".appimage"))
+                    .map(|a| a.name.as_str())
+                    .collect();
+                if all.is_empty() {
+                    String::new()
+                } else {
+                    format!(" It has: {}.", all.join(", "))
+                }
+            }
+        ))),
+        many => Err(Error::Ambiguous(format!(
+            "This release has several AppImages that could be the right one:\n\n{}",
+            many.iter()
+                .map(|a| format!("  {}", a.name))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))),
+    }
+}
+
+/// Every AppImage that could be the right one for this machine (before insisting on exactly one).
+pub fn candidates<'a>(assets: &'a [Asset], arch: &str, pattern: Option<&str>) -> Vec<&'a Asset> {
     let mut c: Vec<&Asset> = assets
         .iter()
         .filter(|a| a.name.to_lowercase().ends_with(".appimage"))
@@ -86,36 +116,29 @@ pub fn select_asset<'a>(
         .copied()
         .filter(|a| mentions(&a.name, host))
         .collect();
-    let untagged: Vec<&Asset> = c
-        .iter()
-        .copied()
-        .filter(|a| !mentions(&a.name, &any_arch))
-        .collect();
-    let pool = if !tagged.is_empty() { tagged } else { untagged };
-    match pool.as_slice() {
-        [one] => Ok(one),
-        [] => Err(Error::NotFound(format!(
-            "This release has no AppImage for {arch}.{}",
-            if c.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " It has: {}.",
-                    c.iter()
-                        .map(|a| a.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }
-        ))),
-        many => Err(Error::Ambiguous(format!(
-            "This release has several AppImages that could be the right one:\n\n{}\n\nInstall the one you want by its download URL (right-click the file on the release page).",
-            many.iter()
-                .map(|a| format!("  {}", a.name))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ))),
+    if !tagged.is_empty() {
+        return tagged;
     }
+    c.into_iter()
+        .filter(|a| !mentions(&a.name, &any_arch))
+        .collect()
+}
+
+/// Is `repo`'s latest release really where this app comes from? Only if exactly one of its files
+/// matches the name pattern of the file we installed. A repo that merely looks related (a homepage
+/// link, a fork) fails this and is never used as an update source.
+pub fn verify_hint(
+    assets: &[Asset],
+    arch: &str,
+    origin_name: &str,
+    version: &str,
+) -> Option<String> {
+    if origin_name.is_empty() {
+        return None;
+    }
+    let pattern = pattern_from_asset(origin_name, version);
+    let a = select_asset(assets, arch, Some(&pattern)).ok()?;
+    glob(&pattern, &a.name).then_some(pattern)
 }
 
 /// `https://github.com/o/r/releases/download/<tag>/<asset>.AppImage` -> (`o/r`, tag, asset).
@@ -293,6 +316,46 @@ mod tests {
                 .unwrap()
                 .name,
             "App-legacy-x86_64.AppImage"
+        );
+    }
+
+    #[test]
+    fn a_hinted_repo_is_only_trusted_if_its_files_match_what_was_installed() {
+        let rel = vec![
+            a("Kdenlive-25.08.1-x86_64.AppImage"),
+            a("Kdenlive-25.08.1-aarch64.AppImage"),
+        ];
+        assert_eq!(
+            verify_hint(&rel, "x86_64", "Kdenlive-1.0-x86_64.AppImage", "1.0").as_deref(),
+            Some("Kdenlive-*-x86_64.AppImage")
+        );
+        // a fork or an unrelated project with a different file name is rejected
+        assert_eq!(
+            verify_hint(
+                &[a("OtherThing-2-x86_64.AppImage")],
+                "x86_64",
+                "Kdenlive-1.0-x86_64.AppImage",
+                "1.0"
+            ),
+            None
+        );
+        // several equally matching files: not unique, so not trusted
+        assert_eq!(
+            verify_hint(
+                &[
+                    a("Kdenlive-2-x86_64.AppImage"),
+                    a("Kdenlive-2-beta-x86_64.AppImage")
+                ],
+                "x86_64",
+                "Kdenlive-1-x86_64.AppImage",
+                "1"
+            ),
+            None
+        );
+        assert_eq!(verify_hint(&rel, "x86_64", "", "1.0"), None);
+        assert_eq!(
+            verify_hint(&[], "x86_64", "Kdenlive-1.0-x86_64.AppImage", "1.0"),
+            None
         );
     }
 
