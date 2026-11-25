@@ -1,0 +1,12 @@
+pub mod appimage;
+pub mod cli;
+pub mod commands;
+pub mod desktop;
+pub mod error;
+pub mod fetch;
+pub mod github;
+pub mod install;
+pub mod output;
+pub mod state;
+pub mod system;
+pub mod version;

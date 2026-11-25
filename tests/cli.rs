@@ -1,0 +1,1085 @@
+mod common;
+use common::*;
+use std::os::unix::fs::PermissionsExt;
+
+fn strip(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c == '\x1b' {
+            for d in it.by_ref() {
+                if d == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn mode(p: &std::path::Path) -> u32 {
+    std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+}
+
+fn obsidian(f: &Fixture, v: &str) -> std::path::PathBuf {
+    f.download(&Spec::new(&format!("Obsidian-{v}.AppImage"), "Obsidian"))
+}
+
+// ---- the core job ---------------------------------------------------------------------------
+
+#[test]
+fn a_downloaded_file_becomes_a_working_app_with_one_command() {
+    let f = Fixture::new();
+    let src = obsidian(&f, "1.8.9");
+    assert_eq!(
+        mode(&src),
+        0o644,
+        "starts life non-executable, as downloaded"
+    );
+    let mut io = TestIo::answering(&["y"]);
+    assert_eq!(
+        f.run(&mut io, &["install", src.to_str().unwrap()]),
+        0,
+        "{}",
+        io.err
+    );
+
+    let app = f.dirs.apps.join("obsidian.AppImage");
+    assert!(app.exists() && !src.exists(), "moved, not copied");
+    assert_eq!(mode(&app), 0o755, "made executable");
+    let launcher = f.dirs.bin.join("obsidian");
+    assert_eq!(mode(&launcher), 0o755);
+    let l = std::fs::read_to_string(&launcher).unwrap();
+    assert!(
+        l.contains(&format!("exec '{}' \"$@\"", app.display())) && l.starts_with("#!/bin/sh"),
+        "{l}"
+    );
+
+    let desktop =
+        std::fs::read_to_string(f.dirs.applications.join("ifhai-obsidian.desktop")).unwrap();
+    assert!(
+        desktop.contains(&format!("Exec={} %U\n", launcher.display())),
+        "{desktop}"
+    );
+    assert!(
+        desktop.contains("Icon=ifhai-obsidian\n")
+            && desktop.contains("X-IFHAI-ID=obsidian")
+            && desktop.contains("Categories=Utility;"),
+        "{desktop}"
+    );
+    assert!(!desktop.contains("AppRun"));
+    assert!(
+        f.dirs
+            .icons
+            .join("256x256/apps/ifhai-obsidian.png")
+            .exists(),
+        "icon sized from the image"
+    );
+
+    let a = &f.state().apps["obsidian"];
+    assert_eq!(
+        (a.name.as_str(), a.version.as_str(), a.mode.as_str()),
+        ("Obsidian", "1.8.9", "fuse")
+    );
+    assert_eq!(a.file, app);
+    assert!(
+        io.out.contains("Installed Obsidian 1.8.9") && io.out.contains("run: obsidian"),
+        "{}",
+        io.out
+    );
+    assert!(
+        io.out.contains("moved (the original is not kept)"),
+        "{}",
+        io.out
+    );
+    assert_eq!(io.asked, vec!["Install Obsidian 1.8.9? [Y/n] "]);
+    assert!(
+        *f.system.refreshes.lock().unwrap() >= 1,
+        "desktop database refreshed"
+    );
+    assert!(
+        std::fs::read_dir(&f.dirs.support)
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().starts_with(".tmp")),
+        "no temp files left"
+    );
+}
+
+#[test]
+fn keep_copies_instead_of_moving() {
+    let f = Fixture::new();
+    let src = obsidian(&f, "1.0");
+    let (code, io) = f.yes(&["install", src.to_str().unwrap(), "--keep"]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert!(src.exists() && f.dirs.apps.join("obsidian.AppImage").exists());
+    assert!(io.out.contains("copied to"), "{}", io.out);
+}
+
+#[test]
+fn several_files_one_confirmation() {
+    let f = Fixture::new();
+    let a = obsidian(&f, "1.0");
+    let b = f.download(&Spec::new("Krita-5.2-x86_64.AppImage", "Krita"));
+    let mut io = TestIo::answering(&["y"]);
+    assert_eq!(
+        f.run(
+            &mut io,
+            &["install", a.to_str().unwrap(), b.to_str().unwrap()]
+        ),
+        0,
+        "{}",
+        io.err
+    );
+    assert_eq!(io.asked, vec!["Install 2 apps? [Y/n] "]);
+    assert_eq!(f.state().apps.len(), 2);
+}
+
+#[test]
+fn confirmation_rules_and_nothing_changes_on_no() {
+    let f = Fixture::new();
+    let src = obsidian(&f, "1.0");
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["install", src.to_str().unwrap()]), 5);
+    assert!(io.err.contains("--yes") && io.asked.is_empty());
+    let mut io = TestIo::answering(&["n"]);
+    assert_eq!(f.run(&mut io, &["install", src.to_str().unwrap()]), 6);
+    assert_eq!(io.err, "ifhai: Cancelled.\n");
+    assert!(
+        src.exists() && mode(&src) == 0o644,
+        "the download is untouched"
+    );
+    assert!(!f.dirs.apps.exists() && !f.dirs.state_file.exists());
+    let mut io = TestIo::answering(&[""]);
+    assert_eq!(
+        f.run(&mut io, &["install", src.to_str().unwrap()]),
+        0,
+        "enter accepts the default"
+    );
+}
+
+#[test]
+fn things_that_are_not_appimages_are_refused_cleanly() {
+    let f = Fixture::new();
+    let txt = f.downloads().join("notes.AppImage");
+    std::fs::write(
+        &txt,
+        "just text, nothing to see here, definitely more than sixty-four bytes of it okay",
+    )
+    .unwrap();
+    let (code, io) = f.yes(&["install", txt.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(
+        io.err.contains("not an executable") || io.err.contains("ELF"),
+        "{}",
+        io.err
+    );
+    let mut elf = ifhai::appimage::testutil::fake(None, false);
+    elf[8..11].copy_from_slice(&[0, 0, 0]);
+    let plain = f.downloads().join("tool");
+    std::fs::write(&plain, elf).unwrap();
+    let (code, io) = f.yes(&["install", plain.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(io.err.contains("not an AppImage"), "{}", io.err);
+    assert!(
+        txt.exists() && plain.exists() && !f.dirs.bin.exists(),
+        "nothing was touched or created"
+    );
+    assert_eq!(f.fetcher.fetches(""), 0);
+}
+
+#[test]
+fn bad_targets_get_clear_errors() {
+    let f = Fixture::new();
+    let (code, io) = f.yes(&["install", f.downloads().to_str().unwrap()]);
+    assert_eq!(
+        (code, io.err.contains("is a folder")),
+        (2, true),
+        "{}",
+        io.err
+    );
+    let (code, io) = f.yes(&["install", "no-such-file.AppImage"]);
+    assert_eq!(code, 3);
+    assert!(io.err.contains("no file called"), "{}", io.err);
+    let (code, io) = f.yes(&["install", "http://example.org/a.AppImage"]);
+    assert_eq!(code, 2);
+    assert!(io.err.contains("https://"), "{}", io.err);
+    let (code, _) = f.yes(&["install", "https://example.org/readme.txt"]);
+    assert_eq!(code, 2);
+    // Only the last path segment ever becomes a file name, so `..` in a URL cannot escape anywhere.
+    let (code, _) = f.yes(&["install", "https://example.org/../evil.AppImage?x=1"]);
+    assert_eq!(code, 1, "the download simply fails here");
+    assert!(!f.dirs.apps.exists() && f.state().apps.is_empty());
+}
+
+// ---- FUSE ------------------------------------------------------------------------------------
+
+#[test]
+fn without_fuse2_an_old_runtime_is_installed_unpacked_and_still_works() {
+    let mut f = Fixture::new();
+    f.host.fuse2 = false;
+    let mut s = Spec::new("Old-1.0.AppImage", "Old");
+    s.needs_fuse2 = true;
+    let src = f.download(&s);
+    let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(code, 0, "{}", io.err);
+    let a = &f.state().apps["old"];
+    assert_eq!(a.mode, "extract");
+    assert!(a.support.join("root/AppRun").exists());
+    let l = std::fs::read_to_string(&a.launcher).unwrap();
+    assert!(
+        l.contains("APPDIR=")
+            && l.contains("exec \"$APPDIR/AppRun\" \"$@\"")
+            && l.contains("APPIMAGE="),
+        "{l}"
+    );
+    assert!(
+        io.err.contains("needs FUSE 2") && io.err.contains("run unpacked"),
+        "{}",
+        io.err
+    );
+}
+
+#[test]
+fn a_modern_runtime_needs_no_fuse2_and_runs_directly() {
+    let mut f = Fixture::new();
+    f.host.fuse2 = false;
+    let src = obsidian(&f, "1.0");
+    let (code, _) = f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert_eq!(f.state().apps["obsidian"].mode, "fuse");
+    assert!(!f.dirs.support.join("obsidian/root").exists());
+}
+
+#[test]
+fn an_old_runtime_with_fuse2_present_runs_directly() {
+    let f = Fixture::new();
+    let mut s = Spec::new("Old-1.0.AppImage", "Old");
+    s.needs_fuse2 = true;
+    let src = f.download(&s);
+    f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(f.state().apps["old"].mode, "fuse");
+}
+
+#[test]
+fn unpacked_mode_without_apprun_is_an_honest_failure() {
+    let mut f = Fixture::new();
+    f.host.fuse2 = false;
+    let mut s = Spec::new("Old-1.0.AppImage", "Old");
+    s.needs_fuse2 = true;
+    s.app_run = false;
+    let src = f.download(&s);
+    let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(io.err.contains("no AppRun"), "{}", io.err);
+    assert!(src.exists() && !f.dirs.apps.join("old.AppImage").exists());
+}
+
+// ---- no duplicates, upgrade, rollback ----------------------------------------------------------
+
+#[test]
+fn a_newer_file_of_the_same_app_upgrades_in_place_with_one_menu_entry() {
+    let f = Fixture::new();
+    f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    let (code, io) = f.yes(&["install", obsidian(&f, "2.0").to_str().unwrap()]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert!(
+        io.out.contains("Upgraded Obsidian 1.0 -> 2.0"),
+        "{}",
+        io.out
+    );
+    let entries: Vec<_> = std::fs::read_dir(&f.dirs.applications)
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(entries.len(), 1, "one menu entry, not two");
+    let a = &f.state().apps["obsidian"];
+    assert_eq!(a.version, "2.0");
+    assert_eq!(a.previous.as_ref().unwrap().version, "1.0");
+    assert!(a.support.join("previous.AppImage").exists());
+    assert_eq!(f.state().apps.len(), 1);
+}
+
+#[test]
+fn installing_the_identical_file_again_changes_nothing_but_drops_the_redundant_download() {
+    let f = Fixture::new();
+    let p = obsidian(&f, "1.0");
+    f.yes(&["install", p.to_str().unwrap(), "--keep"]);
+    let before = f.state().apps["obsidian"].clone();
+    let (code, io) = f.yes(&["install", p.to_str().unwrap()]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert!(io.out.contains("already installed"), "{}", io.out);
+    assert_eq!(
+        f.state().apps["obsidian"],
+        before,
+        "nothing about the install changed"
+    );
+    assert!(f.dirs.apps.join("obsidian.AppImage").exists());
+    assert!(
+        !p.exists(),
+        "the identical download is removed, as the plan said it would be moved"
+    );
+    // With --keep it is left alone.
+    let q = obsidian(&f, "1.0");
+    f.yes(&["install", q.to_str().unwrap(), "--keep"]);
+    assert!(q.exists());
+}
+
+#[test]
+fn rollback_swaps_versions_and_back() {
+    let f = Fixture::new();
+    f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    f.yes(&["install", obsidian(&f, "2.0").to_str().unwrap()]);
+    let before = std::fs::read(f.dirs.apps.join("obsidian.AppImage")).unwrap();
+    let (code, io) = f.yes(&["rollback", "obsidian"]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert!(io.out.contains("is back at 1.0 (was 2.0)"), "{}", io.out);
+    let a = &f.state().apps["obsidian"];
+    assert_eq!(
+        (
+            a.version.as_str(),
+            a.previous.as_ref().unwrap().version.as_str()
+        ),
+        ("1.0", "2.0")
+    );
+    assert_eq!(
+        std::fs::read(a.support.join("previous.AppImage")).unwrap(),
+        before,
+        "the newer one is kept"
+    );
+    assert_eq!(mode(&a.file), 0o755);
+    f.yes(&["rollback", "obsidian"]);
+    assert_eq!(f.state().apps["obsidian"].version, "2.0");
+}
+
+#[test]
+fn rollback_with_no_earlier_version_is_not_found() {
+    let f = Fixture::new();
+    f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    let (code, io) = f.yes(&["rollback", "obsidian"]);
+    assert_eq!(code, 3);
+    assert!(io.err.contains("no earlier version"), "{}", io.err);
+    assert_eq!(f.yes(&["rollback", "nothing"]).0, 3);
+}
+
+// ---- atomicity -------------------------------------------------------------------------------
+
+#[test]
+fn a_failed_unpack_changes_nothing() {
+    let f = Fixture::new();
+    let src = obsidian(&f, "1.0");
+    *f.system.fail_extract.lock().unwrap() = true;
+    let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(
+        io.err.contains("Could not install") && io.err.contains("Could not unpack"),
+        "{}",
+        io.err
+    );
+    assert!(
+        src.exists()
+            && !f.dirs.bin.exists()
+            && !f.dirs.applications.exists()
+            && !f.dirs.state_file.exists()
+    );
+    let leftovers = std::fs::read_dir(&f.dirs.support)
+        .map(|r| r.flatten().count())
+        .unwrap_or(0);
+    assert_eq!(leftovers, 0, "temp area cleaned");
+}
+
+#[test]
+fn a_failure_after_the_move_puts_the_download_back() {
+    let f = Fixture::new();
+    let src = obsidian(&f, "1.0");
+    std::fs::create_dir_all(f.dirs.icons.parent().unwrap()).unwrap();
+    std::fs::write(&f.dirs.icons, "a file where a folder must go").unwrap(); // icon step will fail
+    let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(code, 1, "{}", io.err);
+    assert!(src.exists(), "the download is back where it was");
+    assert!(
+        !f.dirs.apps.join("obsidian.AppImage").exists() && !f.dirs.bin.join("obsidian").exists()
+    );
+    assert!(f.state().apps.is_empty());
+}
+
+#[test]
+fn a_failed_upgrade_leaves_the_working_version_working() {
+    let f = Fixture::new();
+    f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    let old = std::fs::read(f.dirs.apps.join("obsidian.AppImage")).unwrap();
+    let new = obsidian(&f, "2.0");
+    std::fs::remove_dir_all(&f.dirs.icons).unwrap();
+    std::fs::write(&f.dirs.icons, "blocker").unwrap();
+    let (code, _) = f.yes(&["install", new.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        std::fs::read(f.dirs.apps.join("obsidian.AppImage")).unwrap(),
+        old,
+        "old version restored"
+    );
+    assert!(new.exists());
+    assert_eq!(f.state().apps["obsidian"].version, "1.0");
+    assert!(
+        f.dirs.bin.join("obsidian").exists()
+            && f.dirs.applications.join("ifhai-obsidian.desktop").exists()
+    );
+}
+
+// ---- remove / list / run ----------------------------------------------------------------------
+
+#[test]
+fn remove_deletes_everything_it_created_and_nothing_else() {
+    let mut f = Fixture::new();
+    f.host.fuse2 = false;
+    let mut s = Spec::new("Old-1.0.AppImage", "Old");
+    s.needs_fuse2 = true;
+    f.yes(&["install", f.download(&s).to_str().unwrap()]);
+    f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    let other = f.dirs.apps.join("my-own-notes.txt");
+    std::fs::write(&other, "mine").unwrap();
+    let mut io = TestIo::answering(&["y"]);
+    assert_eq!(f.run(&mut io, &["remove", "old"]), 0, "{}", io.err);
+    assert!(
+        io.out.contains("settings and data are not touched") && io.out.contains("Removed: Old"),
+        "{}",
+        io.out
+    );
+    assert!(
+        !f.dirs.apps.join("old.AppImage").exists()
+            && !f.dirs.bin.join("old").exists()
+            && !f.dirs.support.join("old").exists()
+    );
+    assert!(
+        !f.dirs.applications.join("ifhai-old.desktop").exists()
+            && !f.dirs.icons.join("256x256/apps/ifhai-old.png").exists()
+    );
+    assert!(
+        other.exists() && f.dirs.apps.join("obsidian.AppImage").exists(),
+        "unrelated files and other apps untouched"
+    );
+    assert!(!f.state().apps.contains_key("old") && f.state().apps.contains_key("obsidian"));
+    assert!(f.dirs.support.exists(), "still in use by the other app");
+    assert_eq!(f.yes(&["remove", "old"]).0, 3);
+}
+
+#[test]
+fn remove_refuses_a_tampered_record_instead_of_deleting_elsewhere() {
+    let f = Fixture::new();
+    f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    let victim = f.home().join("Documents/important.txt");
+    std::fs::create_dir_all(victim.parent().unwrap()).unwrap();
+    std::fs::write(&victim, "precious").unwrap();
+    let mut state = f.state();
+    state.apps.get_mut("obsidian").unwrap().launcher = victim.clone();
+    state.save(&f.dirs.state_file).unwrap();
+    let (code, io) = f.yes(&["remove", "obsidian"]);
+    assert_eq!(code, 1);
+    assert!(
+        io.err.contains("not somewhere ifhai manages") && io.err.contains("Nothing was deleted"),
+        "{}",
+        io.err
+    );
+    assert!(victim.exists() && f.dirs.apps.join("obsidian.AppImage").exists());
+}
+
+#[test]
+fn ambiguous_names_are_never_guessed() {
+    let f = Fixture::new();
+    f.yes(&[
+        "install",
+        f.download(&Spec::new("Krita-5.AppImage", "Krita"))
+            .to_str()
+            .unwrap(),
+    ]);
+    f.yes(&[
+        "install",
+        f.download(&Spec::new("KritaNext-6.AppImage", "Krita Next"))
+            .to_str()
+            .unwrap(),
+    ]);
+    let (code, io) = f.yes(&["remove", "kri"]);
+    assert_eq!(code, 4);
+    assert!(
+        io.err.contains("krita") && io.err.contains("krita-next"),
+        "{}",
+        io.err
+    );
+    assert_eq!(f.state().apps.len(), 2);
+    assert_eq!(f.yes(&["remove", "Krita"]).0, 0, "an exact name wins");
+}
+
+#[test]
+fn list_shows_installed_apps_and_an_empty_hint() {
+    let f = Fixture::new();
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["list"]), 0);
+    assert!(io.err.contains("Nothing installed yet") && io.out.is_empty());
+    f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    let mut io = TestIo::non_interactive();
+    f.run(&mut io, &["list"]);
+    assert_eq!(io.out, "Obsidian\t1.0\tAppImage\t-\n");
+    let mut io = TestIo::term(&[]);
+    f.run(&mut io, &["list"]);
+    assert!(strip(&io.out).starts_with("App"), "header on a terminal");
+}
+
+#[test]
+fn run_launches_through_the_launcher_and_passes_arguments_and_exit_codes() {
+    let f = Fixture::new();
+    f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["run", "obsidian", "--flag", "file.md"]), 0);
+    assert_eq!(
+        f.system.launched.lock().unwrap()[0],
+        (
+            f.dirs.bin.join("obsidian"),
+            vec!["--flag".to_string(), "file.md".to_string()]
+        )
+    );
+    *f.system.exit_code.lock().unwrap() = 7;
+    let mut io = TestIo::non_interactive();
+    assert_eq!(
+        f.run(&mut io, &["run", "obsidian"]),
+        7,
+        "the app's exit code is ours"
+    );
+    assert!(io.err.is_empty(), "nothing extra printed");
+    assert_eq!(f.run(&mut TestIo::non_interactive(), &["run", "ghost"]), 3);
+}
+
+// ---- GitHub / URL installs ---------------------------------------------------------------------
+
+fn kdenlive_assets(f: &Fixture, v: &str) -> (Spec, Vec<(String, Vec<u8>)>) {
+    let spec = Spec::new(&format!("Kdenlive-{v}-x86_64.AppImage"), "Kdenlive");
+    let bytes = f.bytes_of(&spec);
+    let arm = f.bytes_of(&Spec::new(
+        &format!("Kdenlive-{v}-aarch64.AppImage"),
+        "Kdenlive",
+    ));
+    (
+        spec.clone(),
+        vec![
+            (spec.file_name.clone(), bytes),
+            (format!("Kdenlive-{v}-aarch64.AppImage"), arm),
+            (format!("Kdenlive-{v}.zsync"), b"z".to_vec()),
+        ],
+    )
+}
+
+fn publish(f: &Fixture, repo: &str, tag: &str, v: &str, digest: bool) -> Spec {
+    let (spec, assets) = kdenlive_assets(f, v);
+    let refs: Vec<(&str, Vec<u8>)> = assets
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.clone()))
+        .collect();
+    f.release(repo, tag, &refs, digest);
+    spec
+}
+
+#[test]
+fn owner_repo_installs_the_right_asset_verified_and_remembers_where_it_came_from() {
+    let f = Fixture::new();
+    publish(&f, "KDE/kdenlive", "v25.08.1", "25.08.1", true);
+    let mut io = TestIo::answering(&["y"]);
+    assert_eq!(
+        f.run(&mut io, &["install", "KDE/kdenlive"]),
+        0,
+        "{}",
+        io.err
+    );
+    assert!(
+        io.out.contains("github.com/KDE/kdenlive v25.08.1") && io.out.contains("SHA-256 verified"),
+        "{}",
+        io.out
+    );
+    let a = &f.state().apps["kdenlive"];
+    assert_eq!(
+        (a.version.as_str(), a.tag.as_deref()),
+        ("25.08.1", Some("v25.08.1"))
+    );
+    let src = a.source.as_ref().unwrap();
+    assert_eq!(
+        (src.repo.as_str(), src.pattern.as_str()),
+        ("KDE/kdenlive", "Kdenlive-*-x86_64.AppImage")
+    );
+    assert!(
+        f.fetcher.fetches("aarch64") == 0,
+        "only the right architecture is downloaded"
+    );
+    assert!(
+        std::fs::read_dir(&f.dirs.support)
+            .unwrap()
+            .flatten()
+            .all(|e| e.file_name() != ".dl"),
+        "download area cleaned"
+    );
+}
+
+#[test]
+fn a_corrupted_download_is_discarded_and_nothing_is_installed() {
+    let f = Fixture::new();
+    let spec = publish(&f, "KDE/kdenlive", "v1.0", "1.0", true);
+    f.fetcher.files.lock().unwrap().insert(
+        format!(
+            "https://github.com/KDE/kdenlive/releases/download/v1.0/{}",
+            spec.file_name
+        ),
+        b"tampered".to_vec(),
+    );
+    let (code, io) = f.yes(&["install", "KDE/kdenlive"]);
+    assert_eq!(code, 1);
+    assert!(
+        io.err.contains("does not match its published checksum") && io.err.contains("discarded"),
+        "{}",
+        io.err
+    );
+    assert!(f.state().apps.is_empty() && !f.dirs.apps.join("kdenlive.AppImage").exists());
+    assert_eq!(
+        f.system.extracted.lock().unwrap().len(),
+        0,
+        "never even unpacked"
+    );
+}
+
+#[test]
+fn a_release_without_any_checksum_is_flagged_as_unverified() {
+    let f = Fixture::new();
+    publish(&f, "KDE/kdenlive", "v1.0", "1.0", false);
+    let (code, io) = f.yes(&["install", "KDE/kdenlive"]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert!(
+        io.out
+            .contains("no checksum is published for this file (unverified)"),
+        "{}",
+        io.out
+    );
+}
+
+#[test]
+fn a_checksum_file_in_the_release_is_used_when_the_api_has_no_digest() {
+    let f = Fixture::new();
+    let spec = Spec::new("Tool-1.0-x86_64.AppImage", "Tool");
+    let bytes = f.bytes_of(&spec);
+    let sums = format!("{}  {}\n", sha256(&bytes), spec.file_name);
+    f.release(
+        "o/tool",
+        "v1.0",
+        &[(&spec.file_name, bytes), ("SHA256SUMS", sums.into_bytes())],
+        false,
+    );
+    f.fetcher.texts.lock().unwrap().insert(
+        "https://github.com/o/tool/releases/download/v1.0/SHA256SUMS".into(),
+        format!("{}  {}\n", sha256(&f.bytes_of(&spec)), spec.file_name),
+    );
+    let (code, io) = f.yes(&["install", "o/tool"]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert!(io.out.contains("SHA-256 verified"), "{}", io.out);
+}
+
+#[test]
+fn github_problems_are_reported_as_what_they_are() {
+    let f = Fixture::new();
+    let (code, io) = f.yes(&["install", "ghost/repo"]);
+    assert_eq!(code, 3);
+    assert!(io.err.contains("no published releases"), "{}", io.err);
+    f.release(
+        "o/arm",
+        "v1",
+        &[("App-aarch64.AppImage", b"x".to_vec())],
+        false,
+    );
+    let (code, io) = f.yes(&["install", "o/arm"]);
+    assert_eq!(code, 3);
+    assert!(io.err.contains("no AppImage for x86_64"), "{}", io.err);
+    f.release(
+        "o/two",
+        "v1",
+        &[
+            ("App-x86_64.AppImage", b"a".to_vec()),
+            ("App-legacy-x86_64.AppImage", b"b".to_vec()),
+        ],
+        false,
+    );
+    let (code, io) = f.yes(&["install", "o/two"]);
+    assert_eq!(code, 4);
+    assert!(
+        io.err.contains("legacy") && io.err.contains("download URL"),
+        "{}",
+        io.err
+    );
+    f.fetcher.down.lock().unwrap().push("o/net".into());
+    let (code, io) = f.yes(&["install", "o/net"]);
+    assert_eq!(code, 1);
+    assert!(io.err.contains("network down"), "{}", io.err);
+}
+
+#[test]
+fn an_https_link_installs_but_is_marked_unverified() {
+    let f = Fixture::new();
+    let spec = Spec::new("Tool-1.0-x86_64.AppImage", "Tool");
+    let bytes = f.bytes_of(&spec);
+    f.fetcher.files.lock().unwrap().insert(
+        "https://example.org/dl/Tool-1.0-x86_64.AppImage".into(),
+        bytes,
+    );
+    let (code, io) = f.yes(&["install", "https://example.org/dl/Tool-1.0-x86_64.AppImage"]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert!(io.out.contains("(unverified)"), "{}", io.out);
+    assert!(
+        f.state().apps["tool"].source.is_none(),
+        "no update source from a bare link"
+    );
+}
+
+// ---- updates ---------------------------------------------------------------------------------
+
+#[test]
+fn updates_and_update_follow_the_source_and_keep_the_old_version() {
+    let f = Fixture::new();
+    publish(&f, "KDE/kdenlive", "v1.0", "1.0", true);
+    f.yes(&["install", "KDE/kdenlive"]);
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["updates"]), 0);
+    assert_eq!(io.out, "Kdenlive\t1.0\t1.0\tup to date\n");
+    let api_calls = f.fetcher.fetches("api.github.com");
+
+    publish(&f, "KDE/kdenlive", "v2.0", "2.0", true);
+    let mut io = TestIo::non_interactive();
+    f.run(&mut io, &["updates"]);
+    assert_eq!(io.out, "Kdenlive\t1.0\t2.0\tupdate available\n");
+    assert_eq!(
+        f.fetcher.fetches("api.github.com"),
+        api_calls,
+        "checking for updates uses the redirect, not the API"
+    );
+
+    let mut io = TestIo::answering(&["y"]);
+    assert_eq!(f.run(&mut io, &["update"]), 0, "{}", io.err);
+    assert_eq!(
+        f.fetcher.fetches("api.github.com"),
+        api_calls + 1,
+        "the API is used only when there is something to fetch"
+    );
+    assert!(
+        io.out.contains("1 update(s) available") && io.out.contains("verified"),
+        "{}",
+        io.out
+    );
+    assert!(
+        io.out.contains("Upgraded Kdenlive 1.0 -> 2.0"),
+        "{}",
+        io.out
+    );
+    let a = &f.state().apps["kdenlive"];
+    assert_eq!(
+        (
+            a.version.as_str(),
+            a.tag.as_deref(),
+            a.previous.as_ref().unwrap().version.as_str()
+        ),
+        ("2.0", Some("v2.0"), "1.0")
+    );
+    let mut io = TestIo::non_interactive();
+    f.run(&mut io, &["update"]);
+    assert!(io.out.contains("Everything is up to date."), "{}", io.out);
+}
+
+#[test]
+fn a_locally_installed_app_with_embedded_update_info_can_be_updated() {
+    let f = Fixture::new();
+    let mut s = Spec::new("Kdenlive-1.0-x86_64.AppImage", "Kdenlive");
+    s.update_info =
+        Some("gh-releases-zsync|KDE|kdenlive|latest|Kdenlive-*x86_64.AppImage.zsync".into());
+    f.yes(&["install", f.download(&s).to_str().unwrap()]);
+    let src = f.state().apps["kdenlive"].source.clone().unwrap();
+    assert_eq!(
+        (src.repo.as_str(), src.pattern.as_str()),
+        ("KDE/kdenlive", "Kdenlive-*x86_64.AppImage")
+    );
+    publish(&f, "KDE/kdenlive", "v2.0", "2.0", true);
+    let (code, io) = f.yes(&["update"]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert_eq!(f.state().apps["kdenlive"].version, "2.0");
+}
+
+#[test]
+fn apps_without_a_source_say_so_instead_of_pretending() {
+    let f = Fixture::new();
+    f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    let mut io = TestIo::non_interactive();
+    f.run(&mut io, &["updates"]);
+    assert_eq!(io.out, "Obsidian\t1.0\t-\tno update source\n");
+    let (code, io) = f.yes(&["update", "obsidian"]);
+    assert_eq!(code, 1);
+    assert!(
+        io.err.contains("no update source") && io.err.contains("ifhai install owner/repo"),
+        "{}",
+        io.err
+    );
+    let (code, io) = f.yes(&["update"]);
+    assert_eq!(code, 0);
+    assert!(
+        io.err.contains("No update source for: Obsidian"),
+        "{}",
+        io.err
+    );
+}
+
+#[test]
+fn a_dead_network_is_an_error_not_up_to_date() {
+    let f = Fixture::new();
+    publish(&f, "KDE/kdenlive", "v1.0", "1.0", true);
+    f.yes(&["install", "KDE/kdenlive"]);
+    f.fetcher.down.lock().unwrap().push("KDE/kdenlive".into());
+    let (code, io) = f.yes(&["update"]);
+    assert_eq!(code, 1);
+    assert!(io.err.contains("Could not check for updates"), "{}", io.err);
+    assert!(!io.out.contains("up to date"));
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["updates"]), 1);
+}
+
+#[test]
+fn a_bad_update_download_keeps_the_working_version() {
+    let f = Fixture::new();
+    publish(&f, "KDE/kdenlive", "v1.0", "1.0", true);
+    f.yes(&["install", "KDE/kdenlive"]);
+    let good = std::fs::read(f.dirs.apps.join("kdenlive.AppImage")).unwrap();
+    let spec = publish(&f, "KDE/kdenlive", "v2.0", "2.0", true);
+    f.fetcher.files.lock().unwrap().insert(
+        format!(
+            "https://github.com/KDE/kdenlive/releases/download/v2.0/{}",
+            spec.file_name
+        ),
+        b"corrupt".to_vec(),
+    );
+    let (code, io) = f.yes(&["update"]);
+    assert_eq!(code, 1);
+    assert!(
+        io.err.contains("Could not update Kdenlive") && io.err.contains("checksum"),
+        "{}",
+        io.err
+    );
+    assert_eq!(
+        std::fs::read(f.dirs.apps.join("kdenlive.AppImage")).unwrap(),
+        good
+    );
+    assert_eq!(f.state().apps["kdenlive"].version, "1.0");
+}
+
+// ---- doctor ------------------------------------------------------------------------------------
+
+#[test]
+fn doctor_reports_a_healthy_setup() {
+    let f = Fixture::new();
+    f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["doctor"]), 0, "{}", io.out);
+    assert!(
+        io.out.contains("[ok] FUSE 2 is installed")
+            && io.out.contains("[ok] Obsidian 1.0 is intact.")
+            && io.out.contains("is on your PATH"),
+        "{}",
+        io.out
+    );
+}
+
+#[test]
+fn doctor_finds_missing_files_duplicates_strays_and_environment_problems() {
+    let mut f = Fixture::new();
+    f.host.fuse2 = false;
+    f.host.userns_restricted = true;
+    f.host.path_var = Some("/usr/bin".into());
+    let mut s = Spec::new("Obsidian-1.0.AppImage", "Obsidian");
+    s.electron = true;
+    f.yes(&["install", f.download(&s).to_str().unwrap()]);
+    assert!(f.state().apps["obsidian"].electron);
+    std::fs::remove_file(f.dirs.bin.join("obsidian")).unwrap();
+    // A second menu entry made by some other tool, plus an unrelated AppImage entry.
+    std::fs::write(
+        f.dirs
+            .applications
+            .join("obsidian-appimagelauncher.desktop"),
+        "[Desktop Entry]\nName=Obsidian\nExec=/home/u/Downloads/Obsidian.AppImage\n",
+    )
+    .unwrap();
+    std::fs::write(
+        f.dirs.applications.join("other.desktop"),
+        "[Desktop Entry]\nName=Other Thing\nExec=/home/u/other.appimage %U\n",
+    )
+    .unwrap();
+    std::fs::write(
+        f.dirs.applications.join("firefox.desktop"),
+        "[Desktop Entry]\nName=Firefox\nExec=firefox\n",
+    )
+    .unwrap();
+    std::fs::write(f.dirs.apps.join("Stray-3.AppImage"), "x").unwrap();
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["doctor"]), 1);
+    let o = &io.out;
+    assert!(o.contains("[warn] FUSE 2 is not installed"), "{o}");
+    assert!(
+        o.contains("[warn]") && o.contains("is not on your PATH"),
+        "{o}"
+    );
+    assert!(
+        o.contains("[problem] Obsidian is missing its command"),
+        "{o}"
+    );
+    assert!(
+        o.contains("[problem] Obsidian has a second menu entry that ifhai did not create"),
+        "{o}"
+    );
+    assert!(
+        o.contains("1 other AppImage menu entry is not managed by ifhai: Other Thing"),
+        "{o}"
+    );
+    assert!(
+        !o.contains("Firefox"),
+        "non-AppImage entries are none of our business: {o}"
+    );
+    assert!(
+        o.contains("Stray-3.AppImage") && o.contains("ifhai install"),
+        "{o}"
+    );
+    assert!(
+        o.contains("restricts unprivileged user namespaces") && o.contains("Obsidian"),
+        "{o}"
+    );
+    assert!(
+        io.err.is_empty(),
+        "doctor's exit code speaks for itself: {}",
+        io.err
+    );
+    assert!(
+        f.dirs
+            .applications
+            .join("obsidian-appimagelauncher.desktop")
+            .exists(),
+        "doctor never deletes anything"
+    );
+}
+
+// ---- presentation & misc --------------------------------------------------------------------------
+
+#[test]
+fn terminal_output_is_styled_and_pipes_stay_plain() {
+    let f = Fixture::new();
+    let src = obsidian(&f, "1.0");
+    let mut io = TestIo::term(&["y"]);
+    assert_eq!(
+        f.run(&mut io, &["install", src.to_str().unwrap()]),
+        0,
+        "{}",
+        io.err
+    );
+    assert!(io.out.contains("\x1b["));
+    let p = strip(&io.out);
+    assert!(
+        p.contains("┃ Obsidian 1.0")
+            && p.contains("✓ Installed Obsidian 1.0")
+            && p.contains("→ Installing Obsidian 1.0…"),
+        "{p}"
+    );
+    assert_eq!(strip(&io.asked[0]), "Install Obsidian 1.0? [Y/n] ");
+    let f2 = Fixture::new();
+    let mut plain = TestIo::non_interactive();
+    f2.run(
+        &mut plain,
+        &["install", obsidian(&f2, "1.0").to_str().unwrap(), "--yes"],
+    );
+    assert!(
+        !plain.out.contains('\x1b') && plain.out.is_ascii(),
+        "{}",
+        plain.out
+    );
+}
+
+#[test]
+fn errors_and_cancel_on_a_terminal() {
+    let f = Fixture::new();
+    let mut io = TestIo::term(&[]);
+    assert_eq!(f.run(&mut io, &["install", "nope.AppImage", "--yes"]), 3);
+    assert!(
+        strip(&io.err).starts_with("✗ There is no file called 'nope.AppImage'"),
+        "{}",
+        io.err
+    );
+    let mut io = TestIo::term(&["n"]);
+    assert_eq!(
+        f.run(&mut io, &["install", obsidian(&f, "1.0").to_str().unwrap()]),
+        6
+    );
+    assert_eq!(strip(&io.err), "Cancelled.\n");
+}
+
+#[test]
+fn a_missing_path_entry_is_called_out_after_install() {
+    let mut f = Fixture::new();
+    f.host.path_var = Some("/usr/bin".into());
+    let (code, io) = f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert!(
+        io.err.contains("is not on your PATH") && io.err.contains("export PATH="),
+        "{}",
+        io.err
+    );
+}
+
+#[test]
+fn damaged_state_is_reported_not_reset() {
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.dirs.state_file.parent().unwrap()).unwrap();
+    std::fs::write(&f.dirs.state_file, "apps = [[[").unwrap();
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["list"]), 1);
+    assert!(io.err.contains("damaged"), "{}", io.err);
+    assert_eq!(
+        std::fs::read_to_string(&f.dirs.state_file).unwrap(),
+        "apps = [[["
+    );
+}
+
+#[test]
+fn usage_help_and_version() {
+    let f = Fixture::new();
+    for a in [
+        &["install"][..],
+        &["frobnicate"],
+        &["--bogus"],
+        &["update", "--keep"],
+    ] {
+        let mut io = TestIo::non_interactive();
+        assert_eq!(f.run(&mut io, a), 2, "{a:?}");
+        assert!(io.err.contains("ifhai --help"), "{}", io.err);
+    }
+    for a in [&[][..], &["--help"], &["help"]] {
+        let mut io = TestIo::non_interactive();
+        assert_eq!(f.run(&mut io, a), 0);
+        assert!(
+            io.out.contains("USAGE") && io.out.contains("ifhai install ~/Downloads/Some.AppImage")
+        );
+    }
+    let mut io = TestIo::non_interactive();
+    f.run(&mut io, &["--version"]);
+    assert_eq!(io.out, format!("ifhai {}\n", env!("CARGO_PKG_VERSION")));
+    let mut io = TestIo::term(&[]);
+    f.run(&mut io, &["--help"]);
+    assert_eq!(strip(&io.out), ifhai::cli::HELP);
+}
+
+#[test]
+fn removing_the_last_app_leaves_no_working_folder_behind() {
+    let f = Fixture::new();
+    f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    assert!(f.dirs.support.exists());
+    f.yes(&["remove", "obsidian"]);
+    assert!(!f.dirs.support.exists(), "the hidden .ifhai folder is gone");
+    assert!(
+        f.dirs.apps.exists(),
+        "but the visible Applications folder stays, it is the user's"
+    );
+}
