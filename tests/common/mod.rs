@@ -131,6 +131,8 @@ pub struct MockSystem {
     pub launched: Mutex<Vec<(PathBuf, Vec<String>)>>,
     pub exit_code: Mutex<i32>,
     pub extracted: Mutex<Vec<String>>,
+    /// file name -> the URL a browser recorded as its origin
+    pub origins: Mutex<HashMap<String, String>>,
 }
 
 impl System for MockSystem {
@@ -171,6 +173,13 @@ impl System for MockSystem {
     }
     fn refresh_desktop(&self, _d: &Path) {
         *self.refreshes.lock().unwrap() += 1;
+    }
+    fn origin_url(&self, file: &Path) -> Option<String> {
+        self.origins
+            .lock()
+            .unwrap()
+            .get(file.file_name()?.to_str()?)
+            .cloned()
     }
     fn launch(&self, launcher: &Path, args: &[String]) -> Result<i32> {
         self.launched
@@ -328,6 +337,7 @@ impl Fixture {
             dirs: &self.dirs,
             host: &self.host,
             io,
+            self_exe: "/opt/ifhai/bin/ifhai".into(),
         };
         commands::run(&args, &mut env)
     }

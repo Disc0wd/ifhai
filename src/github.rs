@@ -118,6 +118,38 @@ pub fn select_asset<'a>(
     }
 }
 
+/// `https://github.com/o/r/releases/download/<tag>/<asset>.AppImage` -> (`o/r`, tag, asset).
+/// Browsers record the download URL on the file; this turns it into an exact update source.
+pub fn release_download_url(url: &str) -> Option<(String, String, String)> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let rest = rest.split(['?', '#']).next()?;
+    let p: Vec<&str> = rest.split('/').collect();
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+            && s != ".."
+    };
+    let [owner, repo, "releases", "download", tag, asset] = p.as_slice() else {
+        return None;
+    };
+    let safe_asset = asset
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c));
+    (ok(owner)
+        && ok(repo)
+        && crate::fetch::valid_tag(tag)
+        && safe_asset
+        && asset.to_lowercase().ends_with(".appimage"))
+    .then(|| {
+        (
+            format!("{owner}/{repo}"),
+            tag.to_string(),
+            asset.to_string(),
+        )
+    })
+}
+
 /// `Foo-1.2.3-x86_64.AppImage` + tag `v1.2.3` -> `Foo-*-x86_64.AppImage`, so the same variant is
 /// found in the next release.
 pub fn pattern_from_asset(name: &str, tag: &str) -> String {
@@ -304,6 +336,30 @@ mod tests {
             "no guessing among several lines"
         );
         assert_eq!(sum_for("not a sum", "x"), None);
+    }
+
+    #[test]
+    fn download_urls_become_exact_sources() {
+        let u = "https://github.com/KDE/kdenlive/releases/download/v25.08.1/kdenlive-25.08.1-x86_64.AppImage?x=1";
+        assert_eq!(
+            release_download_url(u),
+            Some((
+                "KDE/kdenlive".into(),
+                "v25.08.1".into(),
+                "kdenlive-25.08.1-x86_64.AppImage".into()
+            ))
+        );
+        for bad in [
+            "http://github.com/a/b/releases/download/v1/x.AppImage",
+            "https://example.org/a/b/releases/download/v1/x.AppImage",
+            "https://github.com/a/b/releases/latest",
+            "https://github.com/a/b/releases/download/v1/x.zip",
+            "https://github.com/a/b/releases/download/v1/%2e%2e.AppImage",
+            "https://github.com/../b/releases/download/v1/x.AppImage",
+            "https://github.com/a/b/releases/download/-v1/x.AppImage",
+        ] {
+            assert_eq!(release_download_url(bad), None, "{bad}");
+        }
     }
 
     #[test]

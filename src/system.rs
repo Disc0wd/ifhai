@@ -25,6 +25,8 @@ pub trait System {
     fn refresh_desktop(&self, applications_dir: &Path);
     /// Run a launcher and wait; returns its exit code.
     fn launch(&self, launcher: &Path, args: &[String]) -> Result<i32>;
+    /// The URL the file was downloaded from, if the browser recorded it (`user.xdg.origin.url`).
+    fn origin_url(&self, file: &Path) -> Option<String>;
 }
 
 pub struct RealSystem;
@@ -139,6 +141,37 @@ impl System for RealSystem {
                 .stderr(Stdio::null())
                 .status();
         }
+    }
+
+    fn origin_url(&self, file: &Path) -> Option<String> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        unsafe extern "C" {
+            fn getxattr(
+                path: *const std::ffi::c_char,
+                name: *const std::ffi::c_char,
+                value: *mut std::ffi::c_void,
+                size: usize,
+            ) -> isize;
+        }
+        let path = CString::new(file.as_os_str().as_bytes()).ok()?;
+        let name = CString::new("user.xdg.origin.url").ok()?;
+        let mut buf = vec![0u8; 2048];
+        // SAFETY: both strings are valid NUL-terminated C strings that outlive the call, and
+        // `buf` is a writable buffer of exactly the length we pass.
+        let n = unsafe {
+            getxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        if n <= 0 {
+            return None;
+        }
+        buf.truncate(n as usize);
+        String::from_utf8(buf).ok()
     }
 
     fn launch(&self, launcher: &Path, args: &[String]) -> Result<i32> {

@@ -70,7 +70,7 @@ pub fn temp_dir(support: &Path, tag: &str) -> PathBuf {
     ))
 }
 
-fn sq(s: &str) -> String {
+pub fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -370,12 +370,20 @@ pub fn install_file(
         std::fs::read(&path).ok().map(|bytes| (bytes, ext, width))
     });
     let mut app = app;
+    // The file may already sit exactly where it belongs (dropped into ~/Applications by hand).
+    // Copying a file onto itself would truncate it, so in that case nothing is moved at all.
+    let in_place = std::fs::canonicalize(src)
+        .ok()
+        .is_some_and(|c| Some(c) == std::fs::canonicalize(&app.file).ok());
+    if in_place {
+        app.previous = existing.as_ref().and_then(|o| o.previous.clone());
+    }
     let mut undo = Undo::default();
     let result = (|| -> Result<()> {
         for dir in [&d.apps, &d.bin, &d.applications, &app.support] {
             std::fs::create_dir_all(dir)?;
         }
-        if existing.is_some() {
+        if existing.is_some() && !in_place {
             let prev = app.support.join("previous.AppImage");
             if app.file.exists() {
                 let _ = std::fs::remove_file(&prev);
@@ -390,7 +398,9 @@ pub fn install_file(
                 undo.moved.push((old_root, aside));
             }
         }
-        if keep {
+        if in_place {
+            // already there
+        } else if keep {
             std::fs::copy(src, &app.file)?;
             undo.created.push(app.file.clone());
         } else {

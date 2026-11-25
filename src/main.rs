@@ -78,6 +78,7 @@ fn main() {
         dirs: &dirs,
         host: &host,
         io: &mut io,
+        self_exe: std::env::current_exe().unwrap_or_else(|_| "ifhai".into()),
     };
     std::process::exit(commands::run(&args, &mut env));
 }

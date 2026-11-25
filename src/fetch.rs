@@ -2,11 +2,11 @@
 //! stack and inherits the system certificates and proxy settings.
 
 use crate::error::{Error, Result};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-pub trait Fetcher {
+pub trait Fetcher: Sync {
     /// GET a small text resource. 404 is `Error::NotFound`; anything else that fails is `Network`.
     fn text(&self, url: &str) -> Result<String>;
     /// Download to `dest`. Same error mapping; a partial file is removed on failure.
@@ -18,7 +18,6 @@ pub trait Fetcher {
 pub struct Curl;
 
 const BASE: &[&str] = &[
-    "--silent",
     "--show-error",
     "--location",
     "--proto",
@@ -43,7 +42,13 @@ pub fn valid_tag(t: &str) -> bool {
 
 impl Curl {
     fn run(&self, extra: &[&str], url: &str) -> Result<Vec<u8>> {
+        self.run_with(extra, url, true)
+    }
+
+    /// `quiet = false` lets curl draw its progress bar on stderr (used for big downloads on a terminal).
+    fn run_with(&self, extra: &[&str], url: &str, quiet: bool) -> Result<Vec<u8>> {
         let mut cmd = Command::new("curl");
+        cmd.arg(if quiet { "--silent" } else { "--progress-bar" });
         cmd.args(BASE)
             .args(["--user-agent", concat!("ifhai/", env!("CARGO_PKG_VERSION"))])
             .args(extra);
@@ -65,7 +70,11 @@ impl Curl {
         });
         let mut child = cmd
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(if quiet {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .spawn()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
@@ -116,8 +125,10 @@ impl Fetcher for Curl {
 
     fn file(&self, url: &str, dest: &Path) -> Result<()> {
         let d = dest.to_string_lossy();
+        // Show curl's progress bar when someone is watching: a 120 MB download must not look hung.
+        let quiet = !std::io::stderr().is_terminal();
         let result = self
-            .run(&["--write-out", "%{http_code}", "--output", &d], url)
+            .run_with(&["--write-out", "%{http_code}", "--output", &d], url, quiet)
             .and_then(|out| Self::status(&String::from_utf8_lossy(&out), url));
         if result.is_err() {
             let _ = std::fs::remove_file(dest);

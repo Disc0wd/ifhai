@@ -293,8 +293,9 @@ fn a_newer_file_of_the_same_app_upgrades_in_place_with_one_menu_entry() {
     let entries: Vec<_> = std::fs::read_dir(&f.dirs.applications)
         .unwrap()
         .flatten()
+        .filter(|e| e.file_name() != "ifhai-install.desktop")
         .collect();
-    assert_eq!(entries.len(), 1, "one menu entry, not two");
+    assert_eq!(entries.len(), 1, "one menu entry for the app, not two");
     let a = &f.state().apps["obsidian"];
     assert_eq!(a.version, "2.0");
     assert_eq!(a.previous.as_ref().unwrap().version, "1.0");
@@ -1125,5 +1126,167 @@ fn a_verified_download_is_hashed_once_not_twice() {
         a.sha256,
         sha256(&std::fs::read(&a.file).unwrap()),
         "the recorded hash is the real one"
+    );
+}
+
+// ---- under the hood ------------------------------------------------------------------------------
+
+#[test]
+fn a_file_already_in_place_is_never_copied_onto_itself() {
+    let f = Fixture::new();
+    std::fs::create_dir_all(&f.dirs.apps).unwrap();
+    // Someone drops the download straight into ~/Applications under the name ifhai would use.
+    let spec = Spec::new("obsidian.AppImage", "Obsidian");
+    let bytes = f.bytes_of(&spec);
+    let p = f.dirs.apps.join("obsidian.AppImage");
+    std::fs::write(&p, &bytes).unwrap();
+    for keep in [true, false] {
+        let mut args = vec!["install", p.to_str().unwrap()];
+        if keep {
+            args.push("--keep");
+        }
+        let (code, io) = f.yes(&args);
+        assert_eq!(code, 0, "keep={keep}: {}", io.err);
+        assert_eq!(
+            std::fs::read(&p).unwrap(),
+            bytes,
+            "the file must be intact (keep={keep})"
+        );
+    }
+    assert!(f.state().apps.contains_key("obsidian"));
+}
+
+#[test]
+fn the_browsers_download_url_becomes_an_exact_update_source() {
+    let f = Fixture::new();
+    let src = f.download(&Spec::new("Kdenlive-1.0-x86_64.AppImage", "Kdenlive"));
+    f.system.origins.lock().unwrap().insert(
+        "Kdenlive-1.0-x86_64.AppImage".into(),
+        "https://github.com/KDE/kdenlive/releases/download/v1.0/Kdenlive-1.0-x86_64.AppImage"
+            .into(),
+    );
+    let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(code, 0, "{}", io.err);
+    let a = &f.state().apps["kdenlive"];
+    let s = a
+        .source
+        .as_ref()
+        .expect("source discovered from the download URL");
+    assert_eq!(
+        (s.repo.as_str(), s.pattern.as_str(), a.tag.as_deref()),
+        ("KDE/kdenlive", "Kdenlive-*-x86_64.AppImage", Some("v1.0"))
+    );
+    publish(&f, "KDE/kdenlive", "v2.0", "2.0", true);
+    let (code, io) = f.yes(&["update"]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert_eq!(
+        f.state().apps["kdenlive"].version,
+        "2.0",
+        "updated without ever being installed from GitHub by hand"
+    );
+}
+
+#[test]
+fn a_foreign_or_malformed_origin_is_ignored() {
+    let f = Fixture::new();
+    for (i, url) in [
+        "https://example.org/dl/App.AppImage",
+        "https://github.com/a/b/releases/download/v1/App.zip",
+        "not a url",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let name = format!("App{i}-1.0.AppImage");
+        let src = f.download(&Spec::new(&name, &format!("App{i}")));
+        f.system
+            .origins
+            .lock()
+            .unwrap()
+            .insert(name, url.to_string());
+        let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
+        assert_eq!(code, 0, "{}", io.err);
+        assert!(f.state().apps[&format!("app{i}")].source.is_none(), "{url}");
+    }
+}
+
+#[test]
+fn an_install_with_ifhai_entry_appears_for_appimage_files_and_goes_with_the_last_app() {
+    let f = Fixture::new();
+    let entry = f.dirs.applications.join("ifhai-install.desktop");
+    f.yes(&["install", obsidian(&f, "1.0").to_str().unwrap()]);
+    let d = std::fs::read_to_string(&entry).unwrap();
+    assert!(
+        d.contains("MimeType=application/vnd.appimage;application/x-iso9660-appimage;"),
+        "{d}"
+    );
+    assert!(
+        d.contains("Terminal=true")
+            && d.contains("NoDisplay=true")
+            && d.contains("Name=Install with ifhai"),
+        "{d}"
+    );
+    assert!(
+        d.contains("/opt/ifhai/bin/ifhai") && d.contains("%f"),
+        "{d}"
+    );
+    assert!(
+        !d.lines()
+            .any(|l| l.starts_with("MimeType") && l.contains("x-scheme")),
+        "never a URL handler"
+    );
+    // A path with spaces and quotes must survive the Exec line.
+    let exec = d.lines().find(|l| l.starts_with("Exec=")).unwrap();
+    assert!(
+        exec.starts_with("Exec=sh -c \"") && exec.ends_with(" ifhai-install %f"),
+        "{exec}"
+    );
+    f.yes(&[
+        "install",
+        f.download(&Spec::new("Krita-5.AppImage", "Krita"))
+            .to_str()
+            .unwrap(),
+    ]);
+    f.yes(&["remove", "obsidian"]);
+    assert!(
+        entry.exists(),
+        "still needed while another app is installed"
+    );
+    f.yes(&["remove", "krita"]);
+    assert!(
+        !entry.exists(),
+        "nothing left behind once the last app is gone"
+    );
+}
+
+#[test]
+fn update_checks_run_side_by_side_and_keep_their_order() {
+    let f = Fixture::new();
+    for (i, repo) in ["o/a", "o/b", "o/c"].iter().enumerate() {
+        let spec = Spec::new(&format!("App{i}-1.0-x86_64.AppImage"), &format!("App{i}"));
+        let b = f.bytes_of(&spec);
+        f.release(repo, "v1.0", &[(spec.file_name.as_str(), b)], true);
+        f.yes(&["install", repo]);
+    }
+    let mut io = TestIo::non_interactive();
+    assert_eq!(f.run(&mut io, &["updates"]), 0, "{}", io.err);
+    let apps: Vec<&str> = io
+        .out
+        .lines()
+        .map(|l| l.split('\t').next().unwrap())
+        .collect();
+    assert_eq!(apps, vec!["App0", "App1", "App2"], "{}", io.out);
+    f.fetcher.down.lock().unwrap().push("o/b".into());
+    let mut io = TestIo::non_interactive();
+    assert_eq!(
+        f.run(&mut io, &["updates"]),
+        0,
+        "one failure must not hide the others"
+    );
+    assert!(
+        io.out.contains("App1\t1.0\t?\tcheck failed")
+            && io.out.contains("App0\t1.0\t1.0\tup to date"),
+        "{}",
+        io.out
     );
 }

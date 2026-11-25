@@ -87,15 +87,20 @@ pub fn quote_exec_arg(s: &str) -> String {
     if !s.contains(special) {
         return s.to_string();
     }
+    // Two layers of escaping apply (Desktop Entry spec, "The Exec key"): inside the quotes, `"` `` ` ``
+    // `$` and `\` take a backslash; and because a backslash in any value must itself be written
+    // `\\`, that backslash is doubled in the file. So an argument `a$b` is written `"a\\$b"`.
     let mut out = String::from("\"");
     for c in s.chars() {
-        if "\"`$\\".contains(c) {
-            out.push('\\');
+        match c {
+            '"' | '`' | '$' => {
+                out.push_str("\\\\");
+                out.push(c);
+            }
+            '\\' => out.push_str("\\\\\\\\"),
+            '%' => out.push_str("%%"), // a literal % must be doubled
+            c => out.push(c),
         }
-        if c == '%' {
-            out.push('%'); // a literal % must be doubled
-        }
-        out.push(c);
     }
     out.push('"');
     out
@@ -204,7 +209,17 @@ mod tests {
             quote_exec_arg("/home/my user/bin/x"),
             "\"/home/my user/bin/x\""
         );
-        assert_eq!(quote_exec_arg("/a/b$c"), "\"/a/b\\$c\"");
+        assert_eq!(
+            quote_exec_arg("/a/b$c"),
+            "\"/a/b\\\\$c\"",
+            "file-level: two backslashes before the $"
+        );
+        assert_eq!(quote_exec_arg("/a/b\"c"), "\"/a/b\\\\\"c\"");
+        assert_eq!(
+            quote_exec_arg("/a/b\\c"),
+            "\"/a/b\\\\\\\\c\"",
+            "a literal backslash is four in the file"
+        );
         assert_eq!(quote_exec_arg("/a/100%"), "\"/a/100%%\"");
     }
 

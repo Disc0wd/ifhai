@@ -73,6 +73,15 @@ required (use `--yes` when not on a terminal), `6` cancelled.
   `ifhai update`, and so does anything installed with `ifhai install owner/repo`. Checking for
   updates follows GitHub's `releases/latest` redirect and only uses the API when there is something
   to fetch, so the 60-requests-an-hour limit is not a problem. (Set `GITHUB_TOKEN` to raise it.)
+- **Double-click works.** The first install adds an "Install with ifhai" entry to your file
+  manager's *Open With* list for AppImage files (it is not made the default, and it disappears with
+  the last app). Choose it on a downloaded file and a terminal opens, shows the plan and installs.
+- **Update source found automatically.** Chromium-based browsers record where a file came from on
+  the file itself. If that was a GitHub release, ifhai uses it as the exact update source, with no
+  `owner/repo` step. (Firefox does not record this, so a file from Firefox only updates if it embeds
+  update information or was installed with `owner/repo`.)
+- **Download progress.** Big downloads show a progress bar on a terminal; update checks run in
+  parallel.
 - **Exact removal.** Everything ifhai creates for an app is recorded. Removal deletes exactly that,
   and refuses any path outside ifhai's own folders, even if the record is damaged.
 
@@ -116,7 +125,7 @@ both take milliseconds.
 cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-75 tests: ELF/AppImage parsing against hostile input, `.desktop` rewriting, asset selection and
+81 tests: ELF/AppImage parsing against hostile input, `.desktop` rewriting, asset selection and
 checksums, and every command end to end (fake AppImages, mock network and system, plus a test that
 installs under every failure mode and checks nothing is left behind). Tests never touch your real
 home directory or the network.

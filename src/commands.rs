@@ -28,6 +28,8 @@ pub struct Env<'a> {
     pub dirs: &'a Dirs,
     pub host: &'a Host,
     pub io: &'a mut dyn Io,
+    /// This executable: the "Install with ifhai" entry runs it.
+    pub self_exe: PathBuf,
 }
 
 fn out_style(env: &Env, no_color: bool) -> Style {
@@ -269,6 +271,39 @@ fn tidy(dirs: &Dirs, apps_existed: bool) {
     }
 }
 
+fn open_with_entry(dirs: &Dirs) -> PathBuf {
+    dirs.applications.join("ifhai-install.desktop")
+}
+
+/// An "Install with ifhai" entry for AppImage files in the file manager's Open With list, so a
+/// downloaded file can be installed without opening a terminal first. It does not become the
+/// default handler, and it is removed together with the last app.
+fn ensure_open_with(env: &Env) {
+    let path = open_with_entry(env.dirs);
+    if path.exists() {
+        return;
+    }
+    let script = format!(
+        "{} install \"$1\"; printf '\\nPress Enter to close. '; read _",
+        install::sq(&env.self_exe.to_string_lossy())
+    );
+    // `%f` is a field code, not an argument: it must reach the desktop unquoted.
+    let exec = format!(
+        "{} %f",
+        ["sh", "-c", &script, "ifhai-install"]
+            .iter()
+            .map(|a| crate::desktop::quote_exec_arg(a))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let body = format!(
+        "# Managed by ifhai. Removed with the last app you remove.\n[Desktop Entry]\nType=Application\nName=Install with ifhai\nComment=Make this AppImage a real app\nExec={exec}\nTerminal=true\nNoDisplay=true\nMimeType=application/vnd.appimage;application/x-iso9660-appimage;\nCategories=Utility;\nX-IFHAI-Managed=true\n"
+    );
+    if std::fs::create_dir_all(&env.dirs.applications).is_ok() {
+        let _ = std::fs::write(&path, body);
+    }
+}
+
 fn size_text(b: u64) -> String {
     if b >= 1 << 20 {
         format!("{:.0} MB", b as f64 / (1u64 << 20) as f64)
@@ -352,7 +387,24 @@ fn download_and_install(
     };
     match job {
         Job::Local { path, .. } => {
-            install::install_file(&ctx, state, path, Origin::default(), keep)
+            let origin = match env
+                .system
+                .origin_url(path)
+                .as_deref()
+                .and_then(github::release_download_url)
+            {
+                Some((repo, tag, asset)) => Origin {
+                    source: Some(Source {
+                        repo,
+                        pattern: github::pattern_from_asset(&asset, &tag),
+                    }),
+                    version_hint: Some(version::display(&tag).to_string()),
+                    tag: Some(tag),
+                    ..Origin::default()
+                },
+                None => Origin::default(),
+            };
+            install::install_file(&ctx, state, path, origin, keep)
         }
         Job::Remote {
             url,
@@ -468,10 +520,11 @@ fn install(env: &mut Env, opts: &Opts, targets: &[String]) -> Result<()> {
             }
         }
     }
-    if ok > 0
-        && let Some(n) = path_note(env)
-    {
-        notes(env, &[n]);
+    if ok > 0 {
+        ensure_open_with(env);
+        if let Some(n) = path_note(env) {
+            notes(env, &[n]);
+        }
     }
     if failed.is_empty() {
         return Ok(());
@@ -545,6 +598,9 @@ fn remove(env: &mut Env, opts: &Opts, names: &[String]) -> Result<()> {
     }
     if !done.is_empty() {
         let _ = std::fs::remove_dir(&env.dirs.support); // only succeeds when it is empty
+        if state.apps.is_empty() {
+            let _ = std::fs::remove_file(open_with_entry(env.dirs));
+        }
         env.system.refresh_desktop(&env.dirs.applications);
         env.io.out(&output::done_lines(st, "Removed", &done));
     }
@@ -633,20 +689,40 @@ impl Check {
 }
 
 fn check(env: &mut Env, apps: Vec<App>) -> Vec<Check> {
-    apps.into_iter()
-        .filter(|a| a.source.is_some())
-        .map(|a| {
-            let repo = a
-                .source
-                .as_ref()
-                .map(|s| s.repo.clone())
-                .unwrap_or_default();
-            Check {
-                latest: env.fetcher.latest_tag(&repo),
-                app: a,
-            }
-        })
-        .collect()
+    let apps: Vec<App> = apps.into_iter().filter(|a| a.source.is_some()).collect();
+    let fetcher = env.fetcher;
+    let mut out = Vec::new();
+    // Each check is a network round trip: run them side by side (eight at a time).
+    for chunk in apps.chunks(8) {
+        let latest: Vec<Result<Option<String>>> = std::thread::scope(|s| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|a| {
+                    let repo = a
+                        .source
+                        .as_ref()
+                        .map(|s| s.repo.clone())
+                        .unwrap_or_default();
+                    s.spawn(move || fetcher.latest_tag(&repo))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|_| Err(Error::Network("the update check crashed".into())))
+                })
+                .collect()
+        });
+        out.extend(
+            chunk
+                .iter()
+                .cloned()
+                .zip(latest)
+                .map(|(app, latest)| Check { app, latest }),
+        );
+    }
+    out
 }
 
 fn updates(env: &mut Env, opts: &Opts) -> Result<()> {
