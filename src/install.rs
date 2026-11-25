@@ -22,6 +22,8 @@ pub struct Origin {
     pub source: Option<Source>,
     pub tag: Option<String>,
     pub version_hint: Option<String>,
+    /// SHA-256 the caller already computed and verified, so the file is not read twice.
+    pub known_sha256: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -196,6 +198,38 @@ fn is_electron(root: &Path) -> bool {
     walk(root, 3)
 }
 
+/// Is `src` byte-identical to the installed file? Different sizes cannot be, so the (slow) hashes
+/// are only computed when the sizes match.
+fn same_content(old: &App, src: &Path, src_sha: &str) -> bool {
+    let (Ok(a), Ok(b)) = (std::fs::metadata(&old.file), std::fs::metadata(src)) else {
+        return false;
+    };
+    if a.len() != b.len() {
+        return false;
+    }
+    let s = if src_sha.is_empty() {
+        sha256_file(src).ok()
+    } else {
+        Some(src_sha.to_string())
+    };
+    let o = if old.sha256.is_empty() {
+        sha256_file(&old.file).ok()
+    } else {
+        Some(old.sha256.clone())
+    };
+    s.is_some() && s == o
+}
+
+/// Run the file directly (FUSE) unless the host cannot: an old runtime needs FUSE 2, and any
+/// runtime needs a `fusermount` to mount itself. Otherwise unpack once and run from the tree.
+pub fn choose_mode(info: &Info, host: &Host) -> &'static str {
+    if (info.runtime_needs_fuse2 && !host.fuse2) || !host.fusermount {
+        "extract"
+    } else {
+        "fuse"
+    }
+}
+
 #[derive(Default)]
 struct Undo {
     created: Vec<PathBuf>,
@@ -230,7 +264,9 @@ pub fn install_file(
         .map_err(|e| Error::Failed(format!("Cannot read {}: {e}", src.display())))?;
     let info: Info = appimage::inspect(&head)
         .map_err(|why| Error::Failed(format!("{} {why}.", src.display())))?;
-    let sha = sha256_file(src)?;
+    // Only a verified download arrives with a hash. Hashing a 120 MB file just to install it would
+    // cost a second for nothing, so it is computed lazily and only when it can matter.
+    let sha = origin.known_sha256.clone().unwrap_or_default();
     let d = ctx.dirs;
 
     std::fs::create_dir_all(&d.support)?;
@@ -267,7 +303,7 @@ pub fn install_file(
         .unwrap_or_else(|| "unknown".into());
     let existing = state.apps.get(&slug).cloned();
 
-    if let Some(old) = existing.as_ref().filter(|o| o.sha256 == sha) {
+    if let Some(old) = existing.as_ref().filter(|o| same_content(o, src, &sha)) {
         cleanup_tmp(&tmp);
         // Byte-identical to what is installed, so a redundant download can go (as promised: moved).
         if !keep && std::fs::canonicalize(src).ok() != std::fs::canonicalize(&old.file).ok() {
@@ -280,11 +316,7 @@ pub fn install_file(
         });
     }
 
-    let mode = if info.runtime_needs_fuse2 && !ctx.host.fuse2 {
-        "extract"
-    } else {
-        "fuse"
-    };
+    let mode = choose_mode(&info, ctx.host);
     if mode == "extract" && !root.join("AppRun").exists() {
         cleanup_tmp(&tmp);
         return Err(Error::Failed(format!(
@@ -293,7 +325,11 @@ pub fn install_file(
     }
     let mut notes = Vec::new();
     if mode == "extract" {
-        notes.push(format!("{name} needs FUSE 2, which this system lacks. It was set up to run unpacked instead, so it works."));
+        notes.push(if ctx.host.fusermount {
+            format!("{name} needs FUSE 2, which this system lacks. It was set up to run unpacked instead, so it works.")
+        } else {
+            format!("This system has no FUSE (no fusermount), which AppImages need to run directly. {name} was set up to run unpacked instead, so it works.")
+        });
     }
     if info.kind == Kind::Type1 && mode == "fuse" {
         notes.push("This is an old (type 1) AppImage; if it does not start, it needs FUSE.".into());
@@ -478,11 +514,7 @@ pub fn rollback(ctx: &Ctx, state: &mut State, slug: &str) -> Result<(String, Str
     let head = appimage::read_head(&prev_file)?;
     let info = appimage::inspect(&head)
         .map_err(|w| Error::Failed(format!("The saved earlier version {w}.")))?;
-    let mode = if info.runtime_needs_fuse2 && !ctx.host.fuse2 {
-        "extract"
-    } else {
-        "fuse"
-    };
+    let mode = choose_mode(&info, ctx.host);
     let swap = app.support.join("swap.AppImage");
     std::fs::rename(&app.file, &swap)?;
     if let Err(e) = std::fs::rename(&prev_file, &app.file) {
@@ -494,7 +526,7 @@ pub fn rollback(ctx: &Ctx, state: &mut State, slug: &str) -> Result<(String, Str
     new.mode = mode.into();
     new.version = prev.version.clone();
     new.tag = prev.tag.clone();
-    new.sha256 = sha256_file(&new.file)?;
+    new.sha256 = String::new(); // unknown: computed only if it is ever needed
     new.previous = Some(Previous {
         version: app.version.clone(),
         tag: app.tag.clone(),

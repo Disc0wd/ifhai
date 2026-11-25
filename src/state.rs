@@ -27,6 +27,7 @@ pub struct App {
     /// "fuse" (run the file) or "extract" (run the unpacked tree; needs no FUSE).
     pub mode: String,
     pub source: Option<Source>,
+    /// SHA-256 of the installed file when it is known (a verified download); empty otherwise.
     pub sha256: String,
     pub electron: bool,
     pub installed_at: u64,

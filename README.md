@@ -64,15 +64,25 @@ required (use `--yes` when not on a terminal), `6` cancelled.
   are quoted correctly, and keys that bypass `Exec` (`DBusActivatable`, `Path`...) are dropped.
   Exactly one entry per app, so upgrades never leave a duplicate.
 - **A command.** `~/.local/bin/<app>`. It warns if that directory is not on your `PATH`.
-- **FUSE handled.** Old AppImage runtimes need FUSE 2, which many distros no longer install. ifhai
-  detects that from the file itself. If the host lacks FUSE 2 it unpacks the app once and runs it
-  from there; otherwise it runs the file directly. Modern runtimes never need FUSE 2.
+- **FUSE handled.** Old AppImage runtimes need FUSE 2, which many distros no longer install, and
+  every runtime needs a `fusermount` to mount itself. ifhai detects both from the file and the
+  system. If the host cannot run the file directly it unpacks the app once and runs it from there;
+  otherwise it runs the file directly. (In a sample of 125 current AppImages none needed FUSE 2, so
+  this mostly rescues old files and bare systems. See [docs/DATA.md](docs/DATA.md).)
 - **Updates without setup.** AppImages that embed GitHub update information update with
   `ifhai update`, and so does anything installed with `ifhai install owner/repo`. Checking for
   updates follows GitHub's `releases/latest` redirect and only uses the API when there is something
   to fetch, so the 60-requests-an-hour limit is not a problem. (Set `GITHUB_TOKEN` to raise it.)
 - **Exact removal.** Everything ifhai creates for an app is recorded. Removal deletes exactly that,
   and refuses any path outside ifhai's own folders, even if the record is damaged.
+
+## Why bother
+
+Measured, not claimed ([docs/DATA.md](docs/DATA.md)): one command instead of about nine; the menu
+entry actually launches (a hand-made one fails when your home path has a space, and the validator
+doesn't notice); upgrades don't leave duplicate entries; you can roll back and remove cleanly; 85%
+of releases can be checksum-verified automatically. It is not faster in any way you would notice,
+both take milliseconds.
 
 ## Safety
 
@@ -106,7 +116,7 @@ required (use `--yes` when not on a terminal), `6` cancelled.
 cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-73 tests: ELF/AppImage parsing against hostile input, `.desktop` rewriting, asset selection and
+75 tests: ELF/AppImage parsing against hostile input, `.desktop` rewriting, asset selection and
 checksums, and every command end to end (fake AppImages, mock network and system, plus a test that
 installs under every failure mode and checks nothing is left behind). Tests never touch your real
 home directory or the network.

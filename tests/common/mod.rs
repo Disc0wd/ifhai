@@ -281,6 +281,7 @@ impl Fixture {
         };
         let host = Host {
             fuse2: true,
+            fusermount: true,
             userns_restricted: false,
             arch: "x86_64".into(),
             path_var: Some(format!("/usr/bin:{}", dirs.bin.display())),

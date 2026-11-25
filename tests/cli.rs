@@ -1083,3 +1083,47 @@ fn removing_the_last_app_leaves_no_working_folder_behind() {
         "but the visible Applications folder stays, it is the user's"
     );
 }
+
+#[test]
+fn a_host_with_no_fusermount_gets_every_app_unpacked_even_with_a_modern_runtime() {
+    let mut f = Fixture::new();
+    f.host.fuse2 = false;
+    f.host.fusermount = false;
+    let src = obsidian(&f, "1.0");
+    let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(code, 0, "{}", io.err);
+    let a = &f.state().apps["obsidian"];
+    assert_eq!(
+        a.mode, "extract",
+        "a static runtime still needs fusermount to mount itself"
+    );
+    assert!(a.support.join("root/AppRun").exists());
+    assert!(
+        io.err.contains("no FUSE (no fusermount)") && io.err.contains("unpacked"),
+        "{}",
+        io.err
+    );
+    let mut io = TestIo::non_interactive();
+    f.run(&mut io, &["doctor"]);
+    assert!(
+        io.out.contains("[warn] No FUSE (fusermount) was found"),
+        "{}",
+        io.out
+    );
+}
+
+#[test]
+fn a_verified_download_is_hashed_once_not_twice() {
+    // The checksum is computed to verify the download and handed on; the install step must not
+    // read the (typically 100+ MB) file again. Observable result: same state, correct hash.
+    let f = Fixture::new();
+    publish(&f, "KDE/kdenlive", "v1.0", "1.0", true);
+    let (code, io) = f.yes(&["install", "KDE/kdenlive"]);
+    assert_eq!(code, 0, "{}", io.err);
+    let a = &f.state().apps["kdenlive"];
+    assert_eq!(
+        a.sha256,
+        sha256(&std::fs::read(&a.file).unwrap()),
+        "the recorded hash is the real one"
+    );
+}

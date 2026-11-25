@@ -251,6 +251,7 @@ fn classify(env: &mut Env, target: &str) -> Result<Job> {
                 }),
                 tag: Some(rel.tag_name.clone()),
                 version_hint: Some(v),
+                ..Origin::default()
             },
         });
     }
@@ -366,6 +367,7 @@ fn download_and_install(
             let file = dir.join(file_name);
             let result = (|| {
                 env.fetcher.file(url, &file)?;
+                let mut origin = origin.clone();
                 if let Some(want) = expect {
                     let got = install::sha256_file(&file)?;
                     if &got != want {
@@ -373,8 +375,9 @@ fn download_and_install(
                             "The downloaded {file_name} does not match its published checksum, so it was discarded.\n  expected {want}\n  got      {got}"
                         )));
                     }
+                    origin.known_sha256 = Some(got); // verified once; do not read 120 MB again
                 }
-                install::install_file(&ctx, state, &file, origin.clone(), false)
+                install::install_file(&ctx, state, &file, origin, false)
             })();
             let _ = std::fs::remove_dir_all(&dir);
             result
@@ -880,6 +883,7 @@ fn update(env: &mut Env, opts: &Opts, names: &[String]) -> Result<()> {
                 }),
                 tag: Some(p.release.tag_name.clone()),
                 version_hint: Some(version::display(&p.release.tag_name).to_string()),
+                ..Origin::default()
             },
         };
         match download_and_install(env, &mut state, &job, false) {
@@ -965,7 +969,12 @@ fn doctor(env: &mut Env, opts: &Opts) -> Result<()> {
     let st = out_style(env, opts.no_color);
     let state = State::load(&env.dirs.state_file)?;
     let mut lines: Vec<(Level, String)> = Vec::new();
-    if env.host.fuse2 {
+    if !env.host.fusermount {
+        lines.push((
+            Level::Warn,
+            "No FUSE (fusermount) was found, so AppImages cannot mount themselves. ifhai sets every app up unpacked instead and they still work. To run them directly, install fuse (Fedora: fuse3, Debian/Ubuntu: fuse3).".into(),
+        ));
+    } else if env.host.fuse2 {
         lines.push((
             Level::Ok,
             "FUSE 2 is installed: AppImages run directly.".into(),

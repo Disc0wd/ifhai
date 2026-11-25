@@ -9,6 +9,8 @@ use std::process::{Command, Stdio};
 pub struct Host {
     /// FUSE 2 is usable: libfuse.so.2 and a `fusermount`.
     pub fuse2: bool,
+    /// Some `fusermount` (2 or 3) exists. Without one no AppImage can mount itself.
+    pub fusermount: bool,
     /// The kernel/AppArmor forbids unprivileged user namespaces (breaks Electron sandboxes).
     pub userns_restricted: bool,
     /// `x86_64`, `aarch64`...
@@ -45,6 +47,11 @@ impl RealSystem {
             "/lib/aarch64-linux-gnu/libfuse.so.2",
         ];
         let lib = libs.iter().any(|p| Path::new(p).exists());
+        let any_fusermount = ["fusermount", "fusermount3"].iter().any(|n| {
+            on_path(n)
+                || Path::new("/usr/bin").join(n).exists()
+                || Path::new("/bin").join(n).exists()
+        });
         let fusermount = on_path("fusermount")
             || Path::new("/usr/bin/fusermount").exists()
             || Path::new("/bin/fusermount").exists();
@@ -58,6 +65,7 @@ impl RealSystem {
                 || read("/proc/sys/user/max_user_namespaces").as_deref() == Some("0");
         Host {
             fuse2: lib && fusermount,
+            fusermount: any_fusermount,
             userns_restricted,
             arch: std::env::consts::ARCH.to_string(),
             path_var: std::env::var("PATH").ok(),
