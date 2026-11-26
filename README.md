@@ -55,6 +55,7 @@ Or build it: `cargo install --git https://github.com/Disc0wd/ifhai`.
 | `ifhai doctor` | Check that everything is set up properly |
 
 Options: `--keep` (install: copy instead of move), `--yes` / `--noconfirm`, `--no-color`.
+`--yes` never accepts an unverified download (see Safety).
 Exit status: `0` ok, `1` failure, `2` usage, `3` not found, `4` ambiguous, `5` confirmation
 required (use `--yes` when not on a terminal), `6` cancelled.
 
@@ -66,7 +67,9 @@ required (use `--yes` when not on a terminal), `6` cancelled.
   `Exec`, `TryExec` and every action point at ifhai's launcher, `Icon` at an installed icon, paths
   are quoted correctly, and keys that bypass `Exec` (`DBusActivatable`, `Path`...) are dropped.
   Exactly one entry per app, so upgrades never leave a duplicate.
-- **A command.** `~/.local/bin/<app>`. It warns if that directory is not on your `PATH`.
+- **A command.** `~/.local/bin/<app>`. It warns if that directory is not on your `PATH`. If a command
+  of that name already exists, or a file is already there that ifhai did not create, the app's command
+  is `ifhai-<app>` instead and ifhai tells you.
 - **FUSE handled.** Old AppImage runtimes need FUSE 2, which many distros no longer install, and
   every runtime needs a `fusermount` to mount itself. ifhai detects both from the file and the
   system. If the host cannot run the file directly it unpacks the app once and runs it from there;
@@ -115,9 +118,14 @@ both take milliseconds.
 
 - Downloads are **HTTPS only**. When GitHub publishes a SHA-256 for a release file (its API does
   since June 2025, or a checksum file in the release), ifhai verifies it and shows
-  "verified" in the plan. When none exists the plan says **"unverified"**: you decide.
+  "verified" in the plan. When none exists the plan says **"unverified"**, and ifhai installs it only
+  after you answer yes at a terminal: `--yes` does not apply, and pressing Enter means no.
   A checksum published next to the file protects against corruption, not against a compromised
   repository.
+- **Nothing it did not create is replaced**: not a command in `~/.local/bin`, and not an app file in
+  `~/Applications`. An app never takes over the name of an existing command such as `git`.
+- Responses are size-limited, text from the catalogue and from AppImages is stripped of terminal
+  control characters, and an update source that now redirects to a different repository is refused.
 - To read an AppImage's name and icon, ifhai runs the AppImage's own runtime with
   `--appimage-extract` after you confirm the install. That runs the file's runtime (not the app),
   which is what every AppImage manager does. Only install files you trust. Before you confirm,

@@ -20,7 +20,7 @@ pub struct Entry {
 }
 
 /// Bump when the reduced entries change shape or cleaning, so old caches are refetched.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct Cache {
@@ -62,7 +62,9 @@ fn plain(s: &str) -> String {
             _ => {}
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    let words = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    // This text is shown on the user's terminal: no escape sequences.
+    words.chars().filter(|c| !c.is_control()).collect()
 }
 
 fn repo_ok(s: &str) -> bool {
@@ -93,7 +95,7 @@ pub fn parse_feed(json: &str) -> Result<Vec<Entry>> {
             .find(|l| l.kind.as_deref() == Some("GitHub"))
             .and_then(|l| l.url.clone());
         if let Some(repo) = repo.filter(|r| repo_ok(r)) {
-            let name = name.trim().to_string();
+            let name = plain(&name);
             if !name.is_empty() {
                 out.push(Entry {
                     name,
@@ -226,6 +228,17 @@ pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<(u32, &'a Entry)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalogue_text_cannot_carry_terminal_escapes() {
+        let json = r#"{"items":[{"name":"Ev\u001b[2Jil","description":"a\u0007b <p>c</p>",
+            "links":[{"type":"GitHub","url":"o/r"}]}]}"#;
+        let e = &parse_feed(json).unwrap()[0];
+        assert_eq!(
+            (e.name.as_str(), e.description.as_str()),
+            ("Ev[2Jil", "ab c")
+        );
+    }
 
     fn e(name: &str, repo: &str, desc: &str) -> Entry {
         Entry {

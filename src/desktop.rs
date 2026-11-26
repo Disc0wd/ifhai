@@ -33,7 +33,12 @@ pub fn parse(text: &str) -> Desktop {
                 && k.chars()
                     .all(|c| c.is_ascii_alphanumeric() || "-[]@_.".contains(c));
             if ok_key {
-                sec.lines.push((k.to_string(), v.trim_start().to_string()));
+                // Values reach the terminal and our menu entry: no control characters.
+                let v = v
+                    .trim_start()
+                    .chars()
+                    .filter(|c| !c.is_control() || *c == '\t');
+                sec.lines.push((k.to_string(), v.collect()));
             }
         }
     }

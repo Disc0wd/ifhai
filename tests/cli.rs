@@ -209,7 +209,11 @@ fn bad_targets_get_clear_errors() {
     let (code, _) = f.yes(&["install", "https://example.org/readme.txt"]);
     assert_eq!(code, 2);
     // Only the last path segment ever becomes a file name, so `..` in a URL cannot escape anywhere.
-    let (code, _) = f.yes(&["install", "https://example.org/../evil.AppImage?x=1"]);
+    let mut io = TestIo::answering(&["y"]);
+    let code = f.run(
+        &mut io,
+        &["install", "https://example.org/../evil.AppImage?x=1"],
+    );
     assert_eq!(code, 1, "the download simply fails here");
     assert!(!f.dirs.apps.exists() && f.state().apps.is_empty());
 }
@@ -649,8 +653,19 @@ fn a_corrupted_download_is_discarded_and_nothing_is_installed() {
 fn a_release_without_any_checksum_is_flagged_as_unverified() {
     let f = Fixture::new();
     publish(&f, "KDE/kdenlive", "v1.0", "1.0", false);
+    // --yes does not accept something that cannot be verified, and Enter means no.
     let (code, io) = f.yes(&["install", "KDE/kdenlive"]);
-    assert_eq!(code, 0, "{}", io.err);
+    assert_eq!(code, 5, "{}", io.err);
+    let mut enter = TestIo::answering(&[""]);
+    assert_eq!(f.run(&mut enter, &["install", "KDE/kdenlive", "--yes"]), 6);
+    assert!(f.state().apps.is_empty());
+    let mut io = TestIo::answering(&["y"]);
+    assert_eq!(
+        f.run(&mut io, &["install", "KDE/kdenlive"]),
+        0,
+        "{}",
+        io.err
+    );
     assert!(
         io.out
             .contains("no checksum is published for this file (unverified)"),
@@ -726,8 +741,9 @@ fn an_https_link_installs_but_is_marked_unverified() {
         "https://example.org/dl/Tool-1.0-x86_64.AppImage".into(),
         bytes,
     );
-    let (code, io) = f.yes(&["install", "https://example.org/dl/Tool-1.0-x86_64.AppImage"]);
-    assert_eq!(code, 0, "{}", io.err);
+    let mut io = TestIo::answering(&["y"]);
+    let url = "https://example.org/dl/Tool-1.0-x86_64.AppImage";
+    assert_eq!(f.run(&mut io, &["install", url]), 0, "{}", io.err);
     assert!(io.out.contains("(unverified)"), "{}", io.out);
     assert!(
         f.state().apps["tool"].source.is_none(),
@@ -1760,4 +1776,66 @@ fn a_cache_from_an_older_format_is_refetched_not_misread() {
     assert_eq!(f.run(&mut io, &["search", "krita"]), 0, "{}", io.err);
     assert_eq!(f.fetcher.fetches("appimage.github.io"), 1, "refetched");
     assert!(io.out.contains("Krita") && !io.out.contains("Old"));
+}
+
+// ---- never take over what ifhai did not create ------------------------------------------------
+
+#[test]
+fn a_file_already_in_the_bin_folder_keeps_its_name_and_the_app_gets_another() {
+    let f = Fixture::new();
+    std::fs::create_dir_all(&f.dirs.bin).unwrap();
+    std::fs::write(f.dirs.bin.join("obsidian"), "the user's own script").unwrap();
+    let src = obsidian(&f, "1.8.9");
+    let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert_eq!(
+        std::fs::read_to_string(f.dirs.bin.join("obsidian")).unwrap(),
+        "the user's own script"
+    );
+    assert_eq!(
+        f.state().apps["obsidian"].launcher,
+        f.dirs.bin.join("ifhai-obsidian")
+    );
+    assert!(
+        io.out.contains("run: ifhai-obsidian") && io.err.contains("already exists"),
+        "{}{}",
+        io.out,
+        io.err
+    );
+    // An upgrade keeps the same command, and removal leaves the user's file alone.
+    let newer = obsidian(&f, "1.9.0");
+    assert_eq!(f.yes(&["install", newer.to_str().unwrap()]).0, 0);
+    assert_eq!(
+        f.state().apps["obsidian"].launcher,
+        f.dirs.bin.join("ifhai-obsidian")
+    );
+    assert_eq!(f.yes(&["remove", "obsidian"]).0, 0);
+    assert!(f.dirs.bin.join("obsidian").exists());
+    assert!(!f.dirs.bin.join("ifhai-obsidian").exists());
+}
+
+#[test]
+fn an_app_named_after_a_system_command_does_not_take_it_over() {
+    let f = Fixture::new();
+    let src = f.download(&Spec::new("sh-1.0.AppImage", "sh"));
+    let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert!(!f.dirs.bin.join("sh").exists());
+    assert!(f.dirs.bin.join("ifhai-sh").exists());
+}
+
+#[test]
+fn an_app_file_ifhai_did_not_install_is_not_replaced() {
+    let f = Fixture::new();
+    std::fs::create_dir_all(&f.dirs.apps).unwrap();
+    std::fs::write(f.dirs.apps.join("obsidian.AppImage"), "saved by hand").unwrap();
+    let src = obsidian(&f, "1.8.9");
+    let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(io.err.contains("did not install it"), "{}", io.err);
+    assert_eq!(
+        std::fs::read_to_string(f.dirs.apps.join("obsidian.AppImage")).unwrap(),
+        "saved by hand"
+    );
+    assert!(src.exists() && f.state().apps.is_empty());
 }

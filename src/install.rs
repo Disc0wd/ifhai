@@ -269,6 +269,54 @@ pub fn choose_mode(info: &Info, host: &Host) -> &'static str {
     }
 }
 
+/// A command called `name` provided by something else on this system.
+fn other_command(ctx: &Ctx, name: &str) -> Option<PathBuf> {
+    const SYSTEM: [&str; 6] = [
+        "/usr/local/sbin",
+        "/usr/local/bin",
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+    ];
+    let path = ctx.host.path_var.clone().unwrap_or_default();
+    std::env::split_paths(&path)
+        .chain(SYSTEM.iter().map(PathBuf::from))
+        .filter(|d| d.is_absolute() && d != &ctx.dirs.bin)
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
+}
+
+/// Where a new app's command goes. The name comes from inside the AppImage, so it must never
+/// replace a file ifhai did not write, nor take over a command that already exists (`git`, `sudo`).
+/// In either case the command is called `ifhai-<name>` instead.
+fn new_launcher(ctx: &Ctx, slug: &str) -> Result<(PathBuf, Option<String>)> {
+    let ours = |p: &Path| {
+        std::fs::read_to_string(p).is_ok_and(|t| t.starts_with("#!/bin/sh\n# Managed by ifhai."))
+    };
+    let free = |p: &Path| std::fs::symlink_metadata(p).is_err() || ours(p);
+    let plain = ctx.dirs.bin.join(slug);
+    let other = other_command(ctx, slug);
+    if other.is_none() && free(&plain) {
+        return Ok((plain, None));
+    }
+    let renamed = ctx.dirs.bin.join(format!("ifhai-{slug}"));
+    if !free(&renamed) {
+        return Err(Error::Failed(format!(
+            "{} already exists and ifhai did not create it, so it was left alone.\nMove it, then try again.",
+            renamed.display()
+        )));
+    }
+    let taken = other.unwrap_or(plain);
+    Ok((
+        renamed,
+        Some(format!(
+            "{} already exists, so this app's command is ifhai-{slug} instead.",
+            taken.display()
+        )),
+    ))
+}
+
 #[derive(Default)]
 struct Undo {
     created: Vec<PathBuf>,
@@ -374,6 +422,32 @@ pub fn install_file(
         notes.push("This is an old (type 1) AppImage; if it does not start, it needs FUSE.".into());
     }
 
+    let file = d.apps.join(format!("{slug}.AppImage"));
+    // Never replace an app file ifhai did not put there (one saved here by hand, say).
+    let same_file = std::fs::canonicalize(src)
+        .ok()
+        .is_some_and(|c| Some(c) == std::fs::canonicalize(&file).ok());
+    if existing.is_none() && !same_file && std::fs::symlink_metadata(&file).is_ok() {
+        cleanup_tmp(&tmp);
+        return Err(Error::Failed(format!(
+            "{} already exists and ifhai did not install it, so it was left alone.\nTo hand it over to ifhai, run: ifhai install {}",
+            file.display(),
+            file.display()
+        )));
+    }
+    let launcher = match &existing {
+        Some(o) => o.launcher.clone(),
+        None => match new_launcher(ctx, &slug) {
+            Ok((path, note)) => {
+                notes.extend(note);
+                path
+            }
+            Err(e) => {
+                cleanup_tmp(&tmp);
+                return Err(e);
+            }
+        },
+    };
     let app = App {
         name: name.clone(),
         slug: slug.clone(),
@@ -404,8 +478,8 @@ pub fn install_file(
             version: o.version.clone(),
             tag: o.tag.clone(),
         }),
-        file: d.apps.join(format!("{slug}.AppImage")),
-        launcher: d.bin.join(&slug),
+        file,
+        launcher,
         desktop: d.applications.join(format!("ifhai-{slug}.desktop")),
         icon: None,
         support: d.support.join(&slug),

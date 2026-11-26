@@ -58,6 +58,26 @@ fn notes(env: &mut Env, list: &[String]) {
     }
 }
 
+/// A download with no published checksum is installed only after a person says yes: `--yes` does
+/// not count, and pressing Enter means no.
+fn confirm_unverified(env: &mut Env, st: Style, question: &str) -> Result<()> {
+    if !env.io.interactive() {
+        return Err(Error::NeedsConfirmation(
+            "A download here has no published checksum, so it cannot be verified. ifhai only installs unverified downloads after you confirm at a terminal; --yes does not apply.".into(),
+        ));
+    }
+    match env
+        .io
+        .ask(&output::prompt(st, question, false))
+        .as_deref()
+        .map(str::to_lowercase)
+        .as_deref()
+    {
+        Some("y") | Some("yes") => Ok(()),
+        _ => Err(Error::Aborted),
+    }
+}
+
 fn confirm(env: &mut Env, st: Style, question: &str, skip: bool) -> Result<()> {
     if skip {
         return Ok(());
@@ -551,9 +571,11 @@ fn download_and_install(
             let result = (|| {
                 // An update with a zsync file downloads only what changed, when zsync is installed. Any
                 // problem simply means a normal download: the checksum below still decides.
-                let mut by_delta = delta.as_ref().is_some_and(|(z, seed)| {
-                    seed.exists() && env.fetcher.delta(z, seed, &file).is_ok() && file.exists()
-                });
+                // Without a published checksum a delta result could not be checked at all.
+                let mut by_delta = expect.is_some()
+                    && delta.as_ref().is_some_and(|(z, seed)| {
+                        seed.exists() && env.fetcher.delta(z, seed, &file).is_ok() && file.exists()
+                    });
                 // A delta result that does not match the published checksum is thrown away and
                 // replaced by a normal download rather than failing the update.
                 if by_delta
@@ -614,7 +636,9 @@ fn report_done(env: &mut Env, st: Style, done: &install::Done) {
             "{}\n",
             st.dim(&format!(
                 "  Start it from your app menu, or run: {}",
-                a.slug
+                a.launcher
+                    .file_name()
+                    .map_or_else(|| a.slug.clone().into(), |n| n.to_string_lossy())
             ))
         ));
     }
@@ -645,7 +669,14 @@ fn install(env: &mut Env, opts: &Opts, targets: &[String]) -> Result<()> {
     } else {
         format!("Install {} apps?", jobs.len())
     };
-    confirm(env, st, &q, opts.yes)?;
+    if jobs
+        .iter()
+        .any(|j| matches!(j, Job::Remote { expect: None, .. }))
+    {
+        confirm_unverified(env, st, &q)?;
+    } else {
+        confirm(env, st, &q, opts.yes)?;
+    }
     let (mut ok, mut failed) = (0, Vec::new());
     for j in &jobs {
         let title = match j {
@@ -1181,7 +1212,15 @@ fn update(env: &mut Env, opts: &Opts, names: &[String]) -> Result<()> {
         },
     ));
     env.io.out("\n");
-    confirm(env, st, "Apply these updates?", opts.yes)?;
+    if plans.iter().any(|p| p.expect.is_none()) {
+        confirm_unverified(
+            env,
+            st,
+            "Apply these updates, including the unverified ones?",
+        )?;
+    } else {
+        confirm(env, st, "Apply these updates?", opts.yes)?;
+    }
     let (mut ok, mut failed) = (
         0,
         problems
