@@ -152,4 +152,8 @@ home directory or the network.
   that does not record the download URL (Firefox). ifhai says so rather than guess.
 - Sandboxing. `doctor` explains Electron sandbox problems; it never turns a sandbox off for you.
 - Release binaries are built for x86_64.
-- A licence file has not been chosen yet.
+
+## Licence
+
+[MIT](LICENSE). Use, copy, modify and redistribute this code for any purpose, including commercial
+use, as long as the copyright notice and licence text stay with it (that notice is the credit).

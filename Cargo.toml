@@ -3,6 +3,7 @@ name = "ifhai"
 version = "0.1.0"
 edition = "2024"
 description = "Makes a downloaded AppImage just work: install, update, remove"
+license = "MIT"
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

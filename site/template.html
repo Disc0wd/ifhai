@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ifhai: a downloaded AppImage that just works</title>
+<meta name="description" content="ifhai turns a downloaded AppImage into a real app with one command: executable, in your menu with its icon, updates, rollback and clean removal.">
+<meta name="theme-color" content="#eef1f4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b1015" media="(prefers-color-scheme: dark)">
+<link rel="preload" href="fonts/SchibstedGrotesk.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+@@CSS@@
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <a class="mark" href="#" aria-label="ifhai, top of page">ifhai</a>
+    <nav class="family" aria-label="The IFHX family"><a href="https://disc0wd.github.io/ifhf/">ifhf</a><a href="https://disc0wd.github.io/ifhai/" aria-current="page">ifhai</a><a href="https://disc0wd.github.io/ifhx/">ifhx</a><a href="@@REPO@@">Source</a></nav>
+  </div>
+
+  <main>
+  <div class="hero">
+    <h1>A downloaded AppImage that just works.</h1>
+    <p class="lede">No <code>chmod</code>, no hunting for a folder, no hand-written menu entry, no missing icon. <b>ifhai</b> turns the file you downloaded into a real app with one command.</p>
+
+    <div class="race vs" id="vs">
+      <div class="pane fl-pane">
+        <header><span class="lbl">By hand</span><span class="clock" aria-hidden="true">~9 steps</span></header>
+        <pre class="out"><span class="c">chmod +x Obsidian-1.8.9.AppImage</span>
+<span class="c">mkdir -p ~/Applications ~/.local/{bin,share/applications}</span>
+<span class="c">mv Obsidian-1.8.9.AppImage ~/Applications/</span>
+<span class="c">~/Applications/Obsidian-1.8.9.AppImage --appimage-extract</span>
+<span class="c">cp squashfs-root/obsidian.png ~/.local/share/icons/…</span>
+<span class="c">sed -e 's|^Exec=.*|Exec=…|' … &gt; ~/.local/share/…</span>
+<span class="c"># …and quote the path, or it breaks on spaces</span>
+<span class="c">ln -s ~/Applications/Obsidian-… ~/.local/bin/obsidian</span>
+<span class="c">update-desktop-database ~/.local/share/applications</span></pre>
+      </div>
+      <div class="pane ih-pane">
+        <header><span class="cmd">ifhai install ~/Downloads/Obsidian-1.8.9…</span><span class="clock" aria-hidden="true">1 command</span></header>
+        <pre class="out">Obsidian 1.8.9
+  From:     ~/Downloads/Obsidian-1.8.9-x86_64.AppImage
+  File:     moved (the original is not kept) to ~/Applications
+  Menu:     an entry with its icon
+  Command:  obsidian
+
+<span class="ok">Installed Obsidian 1.8.9</span>
+  Start it from your app menu, or run: obsidian</pre>
+      </div>
+    </div>
+    <p class="race-note"><span>The right pane is real output of the released binary on a stand-in app; the left is the equivalent shell steps.</span></p>
+
+    <div class="get">
+      <pre><span># or by name: it finds the app, checks the real release, verifies the download</span>
+$ ifhai install obsidian
+<span class="a">┃</span> Obsidian 1.15.1
+<span class="a">┃</span> From     github.com/obsidianmd/obsidian-releases v1.15.1
+<span class="a">┃</span> Size     132 MB
+<span class="a">┃</span> Check    SHA-256 verified against the published checksum
+<span class="a">┃</span> Install  to ~/Applications, in your app menu with its icon</pre>
+    </div>
+  </div>
+
+  <section aria-labelledby="h-does">
+    <h2 id="h-does">What the one command does.</h2>
+    <div class="two">
+      <p><b>Makes it executable and puts it somewhere sensible.</b>The file is validated as an AppImage, then moved into a visible <code>~/Applications</code> so nothing is left in Downloads.</p>
+      <p><b>Writes a menu entry that actually launches.</b>The app's bundled <code>.desktop</code> file is rewritten, not copied: <code>Exec</code> points at the real launcher, paths are quoted correctly, and there is exactly one entry per app.</p>
+      <p><b>Finds the icon.</b>The best icon in the AppImage is installed at the right size, so the app has one in the menu and the dock.</p>
+      <p><b>Adds a command.</b><code>obsidian</code> works in a terminal. If <code>~/.local/bin</code> is not on your PATH it tells you the exact line to add.</p>
+      <p><b>Sorts out FUSE.</b>Old runtimes need FUSE 2 and every runtime needs <code>fusermount</code>. If the system cannot run the file directly, the app is unpacked once and run from there. Nothing to install.</p>
+      <p><b>Undoes itself on failure.</b>Everything is staged, then committed with an undo, so a failure leaves your download, your menu and any previous version exactly as they were.</p>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-after">
+    <h2 id="h-after">Then it looks after it.</h2>
+    <div class="two">
+      <p><b>Upgrade without duplicates.</b>Install a newer file of the same app and it upgrades in place, one menu entry, the old version kept for <code>ifhai rollback</code>.</p>
+      <p><b>Updates from where it came from.</b><code>ifhai update</code> finds a source from the AppImage's own update information, the URL a browser recorded on the download, or the repo named in its metadata (used only after the release is verified to match).</p>
+      <p><b>Install by name.</b><code>ifhai install obsidian</code> searches the AppImageHub catalogue and checks each candidate's real release first, so projects that stopped publishing are never offered.</p>
+      <p><b>Double-click installs.</b>An "Install with ifhai" entry appears in the file manager's Open With list for AppImage files. It is never made the default.</p>
+      <p><b>Exact removal.</b><code>ifhai remove</code> deletes what ifhai created and nothing else, and refuses any path outside its own folders even if its record is damaged.</p>
+      <p><b>Says what is wrong.</b><code>ifhai doctor</code> explains missing FUSE, a command not on your PATH, duplicate menu entries from other tools, and Electron sandbox problems. It reports; it never deletes.</p>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-data">
+    <h2 id="h-data">Measured, not claimed.</h2>
+    <p class="note">Nothing here is faster in a way you would notice: both ways take milliseconds. The case for ifhai is fewer steps, fewer silent failures, and what happens after the install. Measured on a 2020 laptop; method and scripts are in <a href="@@REPO@@/blob/main/docs/DATA.md">docs/DATA.md</a>.</p>
+
+    <table class="tbl">
+      <caption>Does the menu entry actually launch? (home directory with a space in its name)</caption>
+      <thead><tr><th>Method</th><th>Launches?</th><th><code>desktop-file-validate</code></th></tr></thead>
+      <tbody>
+        <tr><td>ifhai</td><td class="good">yes</td><td>0 messages</td></tr>
+        <tr><td>Scripted manual steps</td><td class="bad">no: unquoted path</td><td>0 messages</td></tr>
+        <tr><td>Copy the AppImage's own <code>.desktop</code></td><td class="bad">no: <code>Exec=AppRun</code></td><td>0 messages</td></tr>
+      </tbody>
+    </table>
+    <p class="note">The validator cannot tell. The broken entries appear in your menu and silently do nothing.</p>
+
+    <table class="tbl">
+      <caption>Time to install</caption>
+      <thead><tr><th>App</th><th>By hand (script)</th><th>ifhai</th></tr></thead>
+      <tbody>
+        <tr><td>tiny test app (16 KB)</td><td class="num">17.0 ms</td><td class="num good">4.8 ms</td></tr>
+        <tr><td>median real size (120 MB)</td><td class="num">17.7 ms</td><td class="num good">13.2 ms</td></tr>
+      </tbody>
+    </table>
+
+    <table class="tbl">
+      <caption>150 random AppImageHub projects, latest release, first 2 MB of each file read (nothing executed)</caption>
+      <thead><tr><th>Finding</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>Catalogue entry still installable</td><td class="num">128 of 150 (85%)</td></tr>
+        <tr><td>Latest release has no AppImage / repo has no releases</td><td class="num">11 (7%) / 11 (7%)</td></tr>
+        <tr><td>GitHub publishes a SHA-256, so ifhai can verify the file</td><td class="num">109 of 128 (85%)</td></tr>
+        <tr><td>Nothing to verify against (shown as <em>unverified</em>)</td><td class="num">18 (14%)</td></tr>
+        <tr><td>Runtime needs FUSE 2</td><td class="num">0 of 125 (0%)</td></tr>
+        <tr><td>Embed their own update information</td><td class="num">10 of 125 (8%)</td></tr>
+        <tr><td>Median file size</td><td class="num">120 MB</td></tr>
+      </tbody>
+    </table>
+    <ul class="points">
+      <li><b>The FUSE 2 problem is mostly about old files.</b> No current AppImage in the sample needed it, because modern runtimes are static. ifhai still handles it, and the related case of a system with no <code>fusermount</code> at all.</li>
+      <li><b>15% of catalogue entries are dead.</b> That is why install-by-name checks the release before offering anything.</li>
+      <li>One random sample of 150, GitHub-linked projects only. Caveats are in the data file.</li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="h-safe">
+    <h2 id="h-safe">Careful by default.</h2>
+    <div class="two">
+      <p><b>HTTPS only, verified when possible.</b>If GitHub or the publisher gives a SHA-256, the download is checked and the plan says so. If not, the plan says <em>unverified</em> and you decide. A checksum from the same release catches corruption, not a compromised repository.</p>
+      <p><b>It runs the file's own runtime to read it.</b>To get the name and icon, ifhai runs the AppImage's runtime with <code>--appimage-extract</code> after you confirm. That is what every AppImage manager does. Only install files you trust.</p>
+      <p><b>No root, no daemon.</b>Everything lives in your home directory, and nothing runs in the background.</p>
+      <p><b>No knobs.</b>No config file. The options are <code>--yes</code>, <code>--keep</code> and <code>--no-color</code>. It decides the rest.</p>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-get">
+    <h2 id="h-get">Get it.</h2>
+    <div class="get">
+      <pre><span># with ifhx, the suite manager</span>
+ifhx install ifhai
+
+<span># or directly</span>
+curl -fsSLO @@REPO@@/releases/latest/download/ifhai-x86_64-linux
+curl -fsSL  @@REPO@@/releases/latest/download/ifhai-x86_64-linux.sha256 | sha256sum -c -
+install -Dm755 ifhai-x86_64-linux ~/.local/bin/ifhai</pre>
+      <p class="fine">Or <code>cargo install --git @@REPO@@</code>. Linux; release binaries are x86_64.</p>
+    </div>
+  </section>
+  </main>
+
+  <footer>
+    <span>MIT licensed. Written in Rust. Part of the IFHX family.</span>
+    <nav aria-label="Links"><a href="@@REPO@@">Source</a><a href="@@REPO@@/blob/main/README.md">README</a><a href="@@REPO@@/blob/main/docs/DATA.md">The data</a><a href="@@REPO@@/blob/main/LICENSE">Licence</a></nav>
+  </footer>
+</div>
+</body>
+</html>
