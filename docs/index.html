@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ifhai: a downloaded AppImage that just works</title>
+<title>ifhai: I fucking hate AppImages (a downloaded AppImage that just works)</title>
 <meta name="description" content="ifhai turns a downloaded AppImage into a real app with one command: executable, in your menu with its icon, updates, rollback and clean removal.">
 <meta name="theme-color" content="#eef1f4" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0b1015" media="(prefers-color-scheme: dark)">
@@ -178,12 +178,16 @@ footer nav{display:flex;gap:1.4rem;flex-wrap:wrap}
 .vs .out{font-size:.76rem}
 @media (max-width:56rem){.vs{grid-template-columns:1fr}.vs .out{font-size:.8rem}}
 
+.brand{display:flex;align-items:baseline;gap:.35rem 1rem;flex-wrap:wrap}
+.aka{color:var(--mute);font-size:.92rem}
+@media (max-width:40rem){.top{flex-direction:column;align-items:flex-start;gap:.7rem}.family,.top nav{gap:.5rem 1.1rem;flex-wrap:wrap}}
+
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="top">
-    <a class="mark" href="#" aria-label="ifhai, top of page">ifhai</a>
+    <div class="brand"><a class="mark" href="#" aria-label="ifhai, top of page">ifhai</a><span class="aka">I fucking hate AppImages</span></div>
     <nav class="family" aria-label="The IFHX family"><a href="https://disc0wd.github.io/ifhf/">ifhf</a><a href="https://disc0wd.github.io/ifhai/" aria-current="page">ifhai</a><a href="https://disc0wd.github.io/ifhx/">ifhx</a><a href="https://github.com/Disc0wd/ifhai">Source</a></nav>
   </div>
 

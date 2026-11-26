@@ -1,5 +1,7 @@
 # ifhai
 
+*I fucking hate AppImages.*
+
 Makes a downloaded AppImage just work.
 
 You download a `.AppImage`. Normally you then `chmod +x` it, decide where to keep it, write or fake a
