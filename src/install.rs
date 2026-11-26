@@ -116,15 +116,20 @@ fn inside(root: &Path, p: &Path) -> Option<PathBuf> {
     (c.starts_with(&r) && c.is_file()).then_some(c)
 }
 
+/// The app's menu file: normally at the top level, but some packages only ship it under `usr/`.
 fn find_desktop(root: &Path) -> Option<PathBuf> {
-    let mut names: Vec<PathBuf> = std::fs::read_dir(root)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "desktop"))
-        .collect();
-    names.sort();
-    names.into_iter().find_map(|p| inside(root, &p))
+    [root.to_path_buf(), root.join("usr/share/applications")]
+        .iter()
+        .find_map(|dir| {
+            let mut names: Vec<PathBuf> = std::fs::read_dir(dir)
+                .ok()?
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "desktop"))
+                .collect();
+            names.sort();
+            names.into_iter().find_map(|p| inside(root, &p))
+        })
 }
 
 fn png_width(p: &Path) -> Option<u32> {
@@ -133,46 +138,48 @@ fn png_width(p: &Path) -> Option<u32> {
     (&b[1..4] == b"PNG").then(|| u32::from_be_bytes([b[16], b[17], b[18], b[19]]))
 }
 
+/// Add `p` if it really is an image. Judged by content: packages ship empty files, broken links and
+/// files with the wrong extension.
 fn consider(root: &Path, p: PathBuf, found: &mut Vec<(u32, PathBuf, String)>) {
     let Some(real) = inside(root, &p) else { return };
-    match real.extension().and_then(|e| e.to_str()) {
-        Some("svg") => found.push((100_000, real, "svg".into())),
-        Some("png") => found.push((png_width(&real).unwrap_or(1), real, "png".into())),
-        _ => {}
+    if let Some(width) = png_width(&real) {
+        found.push((width, real, "png".into()));
+    } else if is_svg(&real) {
+        found.push((100_000, real, "svg".into()));
     }
 }
 
-/// The best icon the AppImage ships: SVG first, else the largest PNG.
+fn is_svg(p: &Path) -> bool {
+    let mut head = Vec::new();
+    std::fs::File::open(p).is_ok_and(|f| f.take(64 * 1024).read_to_end(&mut head).is_ok())
+        && head.windows(4).any(|w| w == b"<svg")
+}
+
+/// The best real image for the app, looking where packages put icons (properly or not).
 fn find_icon(root: &Path, name: Option<&str>) -> Option<(PathBuf, String)> {
     let mut found: Vec<(u32, PathBuf, String)> = Vec::new();
+    // `Icon=` should be a bare name; packages also write `app.png` or a path.
+    let name = name.map(|n| {
+        let file = n.rsplit('/').next().unwrap_or(n);
+        [".png", ".svg", ".xpm"]
+            .iter()
+            .find_map(|e| file.strip_suffix(e))
+            .unwrap_or(file)
+    });
     if let Some(n) = name {
-        for ext in ["svg", "png"] {
-            consider(root, root.join(format!("{n}.{ext}")), &mut found);
-        }
+        let mut dirs = vec![root.to_path_buf(), root.join("usr/share/pixmaps")];
         if let Ok(sizes) = std::fs::read_dir(root.join("usr/share/icons/hicolor")) {
-            for s in sizes.flatten() {
-                for ext in ["svg", "png"] {
-                    consider(
-                        root,
-                        s.path().join("apps").join(format!("{n}.{ext}")),
-                        &mut found,
-                    );
-                }
+            dirs.extend(sizes.flatten().map(|s| s.path().join("apps")));
+        }
+        for dir in dirs {
+            for ext in ["svg", "png"] {
+                consider(root, dir.join(format!("{n}.{ext}")), &mut found);
             }
         }
     }
     if found.is_empty() {
-        // `.DirIcon` is usually an extension-less symlink: judge it by content.
-        if let Some(real) = inside(root, &root.join(".DirIcon")) {
-            if png_width(&real).is_some() {
-                found.push((1, real, "png".into()));
-            } else if std::fs::read(&real)
-                .ok()
-                .is_some_and(|b| b.windows(4).take(2048).any(|w| w == b"<svg"))
-            {
-                found.push((1, real, "svg".into()));
-            }
-        }
+        // `.DirIcon` is usually an extension-less symlink.
+        consider(root, root.join(".DirIcon"), &mut found);
     }
     found.sort_by_key(|(w, _, _)| *w);
     found.pop().map(|(_, p, e)| (p, e))
@@ -449,10 +456,11 @@ pub fn install_file(
     }
 
     let mode = choose_mode(&info, ctx.host);
-    if mode == "extract" && !root.join("AppRun").exists() {
+    // Every AppImage starts through AppRun, mounted or unpacked.
+    if !root.join("AppRun").exists() {
         cleanup_tmp(&tmp);
         return Err(Error::Failed(format!(
-            "{name} has no AppRun, so it cannot be started without FUSE."
+            "{name} is missing its start file (AppRun), so it cannot start. The package is broken; report it to the people who publish it."
         )));
     }
     let mut notes = Vec::new();
@@ -531,10 +539,20 @@ pub fn install_file(
     };
 
     // Read the icon now: in unpacked mode the tree is moved before the icon is written.
+    if desk.entry().is_none() {
+        notes.push(format!(
+            "{name} ships no usable menu file, so ifhai made a basic menu entry."
+        ));
+    }
     let icon_pick = find_icon(&root, desk.get("Icon")).and_then(|(path, ext)| {
         let width = png_width(&path);
         std::fs::read(&path).ok().map(|bytes| (bytes, ext, width))
     });
+    if icon_pick.is_none() {
+        notes.push(format!(
+            "{name} ships no usable icon, so it gets a generic one."
+        ));
+    }
     let mut app = app;
     // The file may already sit exactly where it belongs (dropped into ~/Applications by hand).
     // Copying a file onto itself would truncate it, so in that case nothing is moved at all.
@@ -594,10 +612,7 @@ pub fn install_file(
                 app.icon = Some(dest);
                 format!("ifhai-{slug}")
             }
-            None => desk
-                .get("Icon")
-                .map(str::to_string)
-                .unwrap_or_else(|| "application-x-executable".into()),
+            None => "application-x-executable".into(),
         };
         let launcher_body = if mode == "extract" {
             format!(
@@ -615,7 +630,7 @@ pub fn install_file(
         undo.created.push(app.launcher.clone());
         write_atomic(
             &app.desktop,
-            desktop::render(&desk, &slug, &app.launcher, &icon_name).as_bytes(),
+            desktop::render(&desk, &slug, &app.name, &app.launcher, &icon_name).as_bytes(),
             0o644,
         )?;
         undo.created.push(app.desktop.clone());

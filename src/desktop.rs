@@ -17,7 +17,8 @@ pub struct Desktop {
 
 pub fn parse(text: &str) -> Desktop {
     let mut d = Desktop::default();
-    for raw in text.lines() {
+    // Some editors save a byte-order mark, which would hide the first section header.
+    for raw in text.trim_start_matches('\u{feff}').lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -116,13 +117,15 @@ fn dropped(key: &str) -> bool {
     let base = key.split('[').next().unwrap_or(key);
     matches!(
         base,
-        "Exec" | "TryExec" | "Icon" | "Path" | "DBusActivatable" | "Hidden"
+        "Exec" | "TryExec" | "Icon" | "Path" | "DBusActivatable" | "Hidden" | "NoDisplay"
     ) || base.starts_with("X-AppImage")
         || base.starts_with("X-IFHAI")
 }
 
-/// Render our own entry from the bundled one.
-pub fn render(d: &Desktop, slug: &str, launcher: &Path, icon: &str) -> String {
+/// Render our own entry from the bundled one. The result is always a valid, visible application
+/// entry, however incomplete the bundled file is; `name` fills in for a missing `Name`.
+pub fn render(d: &Desktop, slug: &str, name: &str, launcher: &Path, icon: &str) -> String {
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
     let l = quote_exec_arg(&launcher.to_string_lossy());
     let mut out = String::from("# Managed by ifhai. Remove the app with: ifhai remove ");
     out.push_str(slug);
@@ -136,7 +139,8 @@ pub fn render(d: &Desktop, slug: &str, launcher: &Path, icon: &str) -> String {
         }
         out.push_str(&format!("\n[{}]\n", s.name));
         for (k, v) in &s.lines {
-            if dropped(k) {
+            // `Type` is always written below; an empty `Name` is replaced.
+            if dropped(k) || (is_entry && (k == "Type" || (k == "Name" && v.is_empty()))) {
                 continue;
             }
             out.push_str(&format!("{k}={v}\n"));
@@ -155,6 +159,10 @@ pub fn render(d: &Desktop, slug: &str, launcher: &Path, icon: &str) -> String {
         out.push_str(&format!("Exec={exec}\n"));
         if is_entry {
             wrote_entry = true;
+            out.push_str("Type=Application\n");
+            if !s.lines.iter().any(|(k, v)| k == "Name" && !v.is_empty()) {
+                out.push_str(&format!("Name={name}\n"));
+            }
             out.push_str(&format!(
                 "TryExec={l}\nIcon={icon}\nX-IFHAI-ID={slug}\nX-IFHAI-Managed=true\n"
             ));
@@ -163,7 +171,7 @@ pub fn render(d: &Desktop, slug: &str, launcher: &Path, icon: &str) -> String {
         }
     }
     if !wrote_entry {
-        out.push_str(&format!("\n[Desktop Entry]\nType=Application\nName={slug}\nExec={l}\nIcon={icon}\nX-IFHAI-ID={slug}\nX-IFHAI-Managed=true\n"));
+        out.push_str(&format!("\n[Desktop Entry]\nType=Application\nName={name}\nExec={l}\nIcon={icon}\nX-IFHAI-ID={slug}\nX-IFHAI-Managed=true\n"));
     }
     out
 }
@@ -233,6 +241,7 @@ mod tests {
         let out = render(
             &parse(SAMPLE),
             "obsidian",
+            "Obsidian",
             Path::new("/h/.local/bin/obsidian"),
             "ifhai-obsidian",
         );
@@ -275,6 +284,7 @@ mod tests {
         let out = render(
             &parse(SAMPLE),
             "obsidian",
+            "Obsidian",
             Path::new("/home/my user/.local/bin/obsidian"),
             "i",
         );
@@ -289,6 +299,7 @@ mod tests {
     fn a_missing_desktop_entry_still_yields_a_usable_launcher() {
         let out = render(
             &Desktop::default(),
+            "tool",
             "tool",
             Path::new("/b/tool"),
             "ifhai-tool",

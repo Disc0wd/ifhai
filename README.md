@@ -70,6 +70,10 @@ required (use `--yes` when not on a terminal), `6` cancelled.
 - **A command.** `~/.local/bin/<app>`. It warns if that directory is not on your `PATH`. If a command
   of that name already exists, or a file is already there that ifhai did not create, the app's command
   is `ifhai-<app>` instead and ifhai tells you.
+- **Badly packaged apps.** A missing or incomplete menu file still gives a valid, visible entry; icons
+  are searched for where packages actually put them, and empty or broken ones are skipped for a
+  generic icon. ifhai says when it had to fill something in. A package with no `AppRun` cannot start
+  and is refused.
 - **Wrong processor caught.** A 32-bit or ARM build that this computer cannot run is reported as
   such, before anything is executed.
 - **FUSE handled.** Old AppImage runtimes need FUSE 2, which many distros no longer install, and

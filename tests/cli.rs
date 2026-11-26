@@ -1,6 +1,10 @@
 mod common;
 use common::*;
+use ifhai::commands::{self, Env};
+use ifhai::error::Result;
+use ifhai::system::System;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 fn strip(s: &str) -> String {
     let mut out = String::new();
@@ -277,7 +281,7 @@ fn unpacked_mode_without_apprun_is_an_honest_failure() {
     let src = f.download(&s);
     let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
     assert_eq!(code, 1);
-    assert!(io.err.contains("no AppRun"), "{}", io.err);
+    assert!(io.err.contains("(AppRun)"), "{}", io.err);
     assert!(src.exists() && !f.dirs.apps.join("old.AppImage").exists());
 }
 
@@ -1932,4 +1936,151 @@ fn with_32_bit_support_it_installs_using_the_32_bit_fuse_library() {
     let src = built_for(&f, 3, true);
     assert_eq!(f.yes(&["install", src.to_str().unwrap()]).0, 0);
     assert_eq!(f.state().apps["etcher"].mode, "fuse");
+}
+
+// ---- badly packaged apps --------------------------------------------------------------------
+
+/// A stand-in whose unpacked contents are exactly `files` (a value starting `->` is a symlink).
+struct Tree(Vec<(&'static str, Vec<u8>)>);
+
+impl System for Tree {
+    fn extract(&self, _file: &Path, into: &Path, _offset: u64) -> Result<()> {
+        let root = into.join("squashfs-root");
+        std::fs::create_dir_all(&root)?;
+        for (name, bytes) in &self.0 {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            match bytes.strip_prefix(b"->") {
+                Some(to) => std::os::unix::fs::symlink(std::str::from_utf8(to).unwrap(), path)?,
+                None => std::fs::write(path, bytes)?,
+            }
+        }
+        Ok(())
+    }
+    fn refresh_desktop(&self, _dir: &Path) {}
+    fn origin_url(&self, _file: &Path) -> Option<String> {
+        None
+    }
+    fn launch(&self, _launcher: &Path, _args: &[String]) -> Result<i32> {
+        Ok(0)
+    }
+}
+
+const GOOD: &str = "[Desktop Entry]\nType=Application\nName=My App\nExec=AppRun\nIcon=myapp\nCategories=Utility;\n";
+
+/// Install a package with these contents (plus AppRun unless `no_run`); returns the exit code,
+/// the messages, the menu entry and whether an icon was installed.
+fn package(mut files: Vec<(&'static str, Vec<u8>)>, no_run: bool) -> (i32, String, String, bool) {
+    if !no_run {
+        files.push(("AppRun", b"#!/bin/sh\n".to_vec()));
+    }
+    let f = Fixture::new();
+    let src = f.download(&Spec::new("My-App-1.0-x86_64.AppImage", "My App"));
+    let system = Tree(files);
+    let mut io = TestIo::non_interactive();
+    let code = {
+        let mut env = Env {
+            fetcher: &f.fetcher,
+            system: &system,
+            dirs: &f.dirs,
+            host: &f.host,
+            io: &mut io,
+            self_exe: "ifhai".into(),
+        };
+        let args = ["install".into(), src.display().to_string(), "--yes".into()];
+        commands::run(&args, &mut env)
+    };
+    let app = f.state().apps.into_values().next();
+    let entry = app
+        .as_ref()
+        .map(|a| std::fs::read_to_string(&a.desktop).unwrap())
+        .unwrap_or_default();
+    (code, io.err, entry, app.is_some_and(|a| a.icon.is_some()))
+}
+
+fn menu(text: &str) -> (&'static str, Vec<u8>) {
+    ("myapp.desktop", text.as_bytes().to_vec())
+}
+
+fn assert_valid(entry: &str, name: &str) {
+    let lines = |k: &str| entry.lines().filter(|l| l.starts_with(k)).count();
+    assert_eq!((lines("Type="), lines("Name=")), (1, 1), "{entry}");
+    assert!(entry.contains("Type=Application\n"), "{entry}");
+    assert!(entry.contains(&format!("Name={name}\n")), "{entry}");
+    assert!(!entry.contains("NoDisplay"), "{entry}");
+}
+
+#[test]
+fn an_incomplete_or_missing_menu_file_still_gives_a_valid_visible_entry() {
+    let icon = || ("myapp.png", png(256));
+    for broken in [
+        GOOD.replace("Type=Application\n", ""),
+        GOOD.replace("Name=My App\n", ""),
+        GOOD.replace("Name=My App", "Name="),
+        GOOD.replace("Type=Application", "Type=Nonsense"),
+        format!("\u{feff}{GOOD}"),
+        format!("{GOOD}NoDisplay=true\n"),
+    ] {
+        let (code, err, entry, has_icon) = package(vec![menu(&broken), icon()], false);
+        assert_eq!(code, 0, "{broken:?}: {err}");
+        assert_valid(&entry, "My App");
+        assert!(has_icon, "{broken:?}");
+    }
+    for files in [vec![], vec![menu("")], vec![menu("complete junk")]] {
+        let (code, err, entry, _) = package(files, false);
+        assert_eq!(code, 0, "{err}");
+        assert_valid(&entry, "My App");
+        assert!(err.contains("no usable menu file"), "{err}");
+    }
+    // Only under usr/share/applications.
+    let nested = ("usr/share/applications/x.desktop", GOOD.as_bytes().to_vec());
+    let (_, _, entry, _) = package(vec![nested], false);
+    assert!(entry.contains("Categories=Utility;"), "{entry}");
+}
+
+#[test]
+fn icons_are_found_where_packages_really_put_them() {
+    for (icon_line, path) in [
+        ("Icon=myapp.png", "myapp.png"),
+        (
+            "Icon=/usr/share/pixmaps/myapp.png",
+            "usr/share/pixmaps/myapp.png",
+        ),
+        ("Icon=myapp", "usr/share/pixmaps/myapp.png"),
+        ("Icon=something-else", ".DirIcon"),
+    ] {
+        let entry_text = GOOD.replace("Icon=myapp", icon_line);
+        let (code, err, entry, has_icon) =
+            package(vec![menu(&entry_text), (path, png(128))], false);
+        assert_eq!(code, 0, "{err}");
+        assert!(
+            has_icon && entry.contains("Icon=ifhai-my-app\n"),
+            "{icon_line} at {path}: {entry}"
+        );
+    }
+}
+
+#[test]
+fn broken_icons_are_replaced_by_a_generic_one_and_mentioned() {
+    for icon in [
+        ("myapp.png", Vec::new()),
+        ("myapp.png", b"<html>404</html>".to_vec()),
+        (".DirIcon", b"->nothing.png".to_vec()),
+        (".DirIcon", b"->/etc/hostname".to_vec()),
+    ] {
+        let (code, err, entry, has_icon) = package(vec![menu(GOOD), icon], false);
+        assert_eq!(code, 0, "{err}");
+        assert!(
+            !has_icon && entry.contains("Icon=application-x-executable\n"),
+            "{entry}"
+        );
+        assert!(err.contains("no usable icon"), "{err}");
+    }
+}
+
+#[test]
+fn a_package_with_no_start_file_is_refused() {
+    let (code, err, entry, _) = package(vec![menu(GOOD)], true);
+    assert_eq!(code, 1);
+    assert!(err.contains("AppRun") && entry.is_empty(), "{err}");
 }
