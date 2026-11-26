@@ -223,7 +223,7 @@ footer nav{display:flex;gap:1.4rem;flex-wrap:wrap}
     </div>
     <p class="race-note"><span>The right pane is real output of the released binary on a stand-in app; the left is the equivalent shell steps.</span></p>
 
-    <div class="get">
+    <div class="get get-demo">
       <pre><span># or by name: it finds the app, checks the real release, verifies the download</span>
 $ ifhai install obsidian
 <span class="a">┃</span> Obsidian 1.15.1
@@ -231,6 +231,17 @@ $ ifhai install obsidian
 <span class="a">┃</span> Size     132 MB
 <span class="a">┃</span> Check    SHA-256 verified against the published checksum
 <span class="a">┃</span> Install  to ~/Applications, in your app menu with its icon</pre>
+    </div>
+
+    <div class="get">
+      <pre><span># with ifhx, the suite manager</span>
+ifhx install ifhai
+
+<span># or directly</span>
+curl -fsSLO https://github.com/Disc0wd/ifhai/releases/latest/download/ifhai-x86_64-linux
+curl -fsSL  https://github.com/Disc0wd/ifhai/releases/latest/download/ifhai-x86_64-linux.sha256 | sha256sum -c -
+install -Dm755 ifhai-x86_64-linux ~/.local/bin/ifhai</pre>
+      <p class="fine">Or <code>cargo install --git https://github.com/Disc0wd/ifhai</code>. Linux; release binaries are x86_64.</p>
     </div>
   </div>
 
@@ -304,32 +315,18 @@ $ ifhai install obsidian
 
   <section aria-labelledby="h-safe">
     <h2 id="h-safe">Careful by default.</h2>
-    <div class="two">
-      <p><b>HTTPS only, verified when possible.</b>If GitHub or the publisher gives a SHA-256, the download is checked and the plan says so. If not, the plan says <em>unverified</em> and you decide. A checksum from the same release catches corruption, not a compromised repository.</p>
-      <p><b>It runs the file's own runtime to read it.</b>To get the name and icon, ifhai runs the AppImage's runtime with <code>--appimage-extract</code> after you confirm. That is what every AppImage manager does. Only install files you trust.</p>
-      <p><b>No root, no daemon.</b>Everything lives in your home directory, and nothing runs in the background.</p>
-      <p><b>No knobs.</b>No config file. The options are <code>--yes</code>, <code>--keep</code> and <code>--no-color</code>. It decides the rest.</p>
-    </div>
-  </section>
-
-  <section aria-labelledby="h-get">
-    <h2 id="h-get">Get it.</h2>
-    <div class="get">
-      <pre><span># with ifhx, the suite manager</span>
-ifhx install ifhai
-
-<span># or directly</span>
-curl -fsSLO https://github.com/Disc0wd/ifhai/releases/latest/download/ifhai-x86_64-linux
-curl -fsSL  https://github.com/Disc0wd/ifhai/releases/latest/download/ifhai-x86_64-linux.sha256 | sha256sum -c -
-install -Dm755 ifhai-x86_64-linux ~/.local/bin/ifhai</pre>
-      <p class="fine">Or <code>cargo install --git https://github.com/Disc0wd/ifhai</code>. Linux; release binaries are x86_64.</p>
-    </div>
+    <ul class="rules">
+      <li><b>HTTPS only, verified when possible.</b><span>If GitHub or the publisher gives a SHA-256, the download is checked and the plan says so. If not, the plan says <em>unverified</em> and you decide. A checksum from the same release catches corruption, not a compromised repository.</span></li>
+      <li><b>It runs the file's own runtime to read it.</b><span>To get the name and icon, ifhai runs the AppImage's runtime with <code>--appimage-extract</code> after you confirm. That is what every AppImage manager does. Only install files you trust.</span></li>
+      <li><b>No root, no daemon.</b><span>Everything lives in your home directory, and nothing runs in the background.</span></li>
+      <li><b>No knobs.</b><span>No config file. The options are <code>--yes</code>, <code>--keep</code> and <code>--no-color</code>. It decides the rest.</span></li>
+    </ul>
   </section>
   </main>
 
   <footer>
     <span>MIT licensed. Written in Rust. Part of the IFHX family.</span>
-    <nav aria-label="Links"><a href="https://github.com/Disc0wd/ifhai">Source</a><a href="https://github.com/Disc0wd/ifhai/blob/main/README.md">README</a><a href="https://github.com/Disc0wd/ifhai/blob/main/docs/DATA.md">The data</a><a href="https://github.com/Disc0wd/ifhai/blob/main/LICENSE">Licence</a></nav>
+    <nav aria-label="Links"><a href="https://github.com/Disc0wd/ifhai">Source</a><a href="https://github.com/Disc0wd/ifhai/blob/main/README.md">README</a><a href="https://github.com/Disc0wd/ifhai/blob/main/LICENSE">Licence</a><a href="https://github.com/Disc0wd/ifhai/blob/main/docs/DATA.md">The data</a></nav>
   </footer>
 </div>
 </body>
