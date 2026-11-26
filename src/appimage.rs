@@ -12,6 +12,8 @@ pub enum Kind {
 pub struct Info {
     pub kind: Kind,
     /// Where the runtime ends and the filesystem image starts (end of the ELF section table).
+    /// ELF `e_machine`: the processor the runtime (and so the app) is built for.
+    pub machine: u16,
     pub fs_offset: u64,
     /// Raw `.upd_info` section contents (type 2), trimmed.
     pub update_info: Option<String>,
@@ -141,6 +143,7 @@ pub fn inspect(data: &[u8]) -> Result<Info, Invalid> {
     let runtime_needs_fuse2 = runtime.windows(12).any(|w| w == b"libfuse.so.2");
     Ok(Info {
         kind,
+        machine: u16le(data, 0x12).unwrap_or(0) as u16,
         fs_offset,
         update_info,
         runtime_needs_fuse2,
@@ -223,7 +226,7 @@ pub fn name_and_version(file_name: &str) -> (String, Option<String>) {
         .or_else(|| file_name.strip_suffix(".appimage"))
         .unwrap_or(file_name);
     let arch = [
-        "x86_64", "amd64", "x64", "aarch64", "arm64", "armhf", "i386", "i686", "linux",
+        "x86_64", "amd64", "x64", "aarch64", "arm64", "armhf", "i386", "i686", "ia32", "linux",
     ];
     // `x86_64` contains the separator we split on, so neutralise it first.
     let stem = stem

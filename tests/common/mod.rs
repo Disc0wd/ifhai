@@ -326,6 +326,8 @@ impl Fixture {
         };
         let host = Host {
             fuse2: true,
+            compat32: false,
+            fuse2_32: false,
             fusermount: true,
             userns_restricted: false,
             arch: "x86_64".into(),

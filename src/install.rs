@@ -262,7 +262,12 @@ fn same_content(old: &App, src: &Path, src_sha: &str) -> bool {
 /// Run the file directly (FUSE) unless the host cannot: an old runtime needs FUSE 2, and any
 /// runtime needs a `fusermount` to mount itself. Otherwise unpack once and run from the tree.
 pub fn choose_mode(info: &Info, host: &Host) -> &'static str {
-    if (info.runtime_needs_fuse2 && !host.fuse2) || !host.fusermount {
+    let fuse2 = if info.machine == EM_386 && host.arch == "x86_64" {
+        host.fuse2_32
+    } else {
+        host.fuse2
+    };
+    if (info.runtime_needs_fuse2 && !fuse2) || !host.fusermount {
         "extract"
     } else {
         "fuse"
@@ -317,6 +322,41 @@ fn new_launcher(ctx: &Ctx, slug: &str) -> Result<(PathBuf, Option<String>)> {
     ))
 }
 
+const EM_386: u16 = 3;
+const EM_ARM: u16 = 40;
+const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
+
+/// Why this computer cannot run the file at all, if it cannot. Unknown processors are let through.
+fn wrong_processor(info: &Info, host: &Host) -> Option<String> {
+    let built = match info.machine {
+        EM_386 => "32-bit x86 (i386)",
+        EM_ARM => "32-bit ARM",
+        EM_X86_64 => "x86_64",
+        EM_AARCH64 => "64-bit ARM (aarch64)",
+        _ => return None,
+    };
+    let (native, smaller) = match host.arch.as_str() {
+        "x86_64" => (EM_X86_64, Some(EM_386)),
+        "aarch64" => (EM_AARCH64, Some(EM_ARM)),
+        "x86" => (EM_386, None),
+        "arm" => (EM_ARM, None),
+        _ => return None,
+    };
+    if info.machine == native || (Some(info.machine) == smaller && host.compat32) {
+        return None;
+    }
+    let why = if Some(info.machine) == smaller {
+        "and this system has no 32-bit support"
+    } else {
+        "and this computer cannot run it"
+    };
+    Some(format!(
+        "is built for {built}, {why}. Installing FUSE will not help.\nDownload the {} version of the app instead.",
+        host.arch
+    ))
+}
+
 #[derive(Default)]
 struct Undo {
     created: Vec<PathBuf>,
@@ -351,6 +391,11 @@ pub fn install_file(
         .map_err(|e| Error::Failed(format!("Cannot read {}: {e}", src.display())))?;
     let info: Info = appimage::inspect(&head)
         .map_err(|why| Error::Failed(format!("{} {why}.", src.display())))?;
+    // Checked before anything runs: a program for another processor fails with a baffling error.
+    if let Some(why) = wrong_processor(&info, ctx.host) {
+        let file = src.file_name().unwrap_or(src.as_os_str()).to_string_lossy();
+        return Err(Error::Failed(format!("{file} {why}")));
+    }
     // Only a verified download arrives with a hash. Hashing a 120 MB file just to install it would
     // cost a second for nothing, so it is computed lazily and only when it can matter.
     let sha = origin.known_sha256.clone().unwrap_or_default();

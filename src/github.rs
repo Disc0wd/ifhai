@@ -46,7 +46,7 @@ const ARCHES: &[(&str, &[&str])] = &[
     ("x86_64", &["x86_64", "amd64", "x64"]),
     ("aarch64", &["aarch64", "arm64"]),
     ("arm", &["armhf", "armv7"]),
-    ("x86", &["i386", "i686", "x86_32"]),
+    ("x86", &["i386", "i686", "x86_32", "ia32"]),
 ];
 
 fn tokens(arch: &str) -> &'static [&'static str] {

@@ -9,6 +9,10 @@ use std::process::{Command, Stdio};
 pub struct Host {
     /// FUSE 2 is usable: libfuse.so.2 and a `fusermount`.
     pub fuse2: bool,
+    /// 32-bit programs can run (the 32-bit loader is installed).
+    pub compat32: bool,
+    /// FUSE 2 is usable by 32-bit programs, which need their own copy of the library.
+    pub fuse2_32: bool,
     /// Some `fusermount` (2 or 3) exists. Without one no AppImage can mount itself.
     pub fusermount: bool,
     /// The kernel/AppArmor forbids unprivileged user namespaces (breaks Electron sandboxes).
@@ -47,8 +51,22 @@ impl RealSystem {
             "/lib/x86_64-linux-gnu/libfuse.so.2",
             "/usr/lib/aarch64-linux-gnu/libfuse.so.2",
             "/lib/aarch64-linux-gnu/libfuse.so.2",
+            "/usr/lib/i386-linux-gnu/libfuse.so.2",
+            "/usr/lib/arm-linux-gnueabihf/libfuse.so.2",
         ];
-        let lib = libs.iter().any(|p| Path::new(p).exists());
+        // A path says nothing about word size (/usr/lib is 32-bit on Fedora, 64-bit on Arch), so
+        // read it from the library itself.
+        let has_lib = |class: u8| libs.iter().any(|p| elf_class(Path::new(p)) == Some(class));
+        let lib = has_lib(if cfg!(target_pointer_width = "64") {
+            2
+        } else {
+            1
+        });
+        let loader32 = match std::env::consts::ARCH {
+            "x86_64" => "/lib/ld-linux.so.2",
+            "aarch64" => "/lib/ld-linux-armhf.so.3",
+            _ => "",
+        };
         let any_fusermount = ["fusermount", "fusermount3"].iter().any(|n| {
             on_path(n)
                 || Path::new("/usr/bin").join(n).exists()
@@ -67,12 +85,22 @@ impl RealSystem {
                 || read("/proc/sys/user/max_user_namespaces").as_deref() == Some("0");
         Host {
             fuse2: lib && fusermount,
+            compat32: !loader32.is_empty() && Path::new(loader32).exists(),
+            fuse2_32: has_lib(1) && fusermount,
             fusermount: any_fusermount,
             userns_restricted,
             arch: std::env::consts::ARCH.to_string(),
             path_var: std::env::var("PATH").ok(),
         }
     }
+}
+
+/// 1 for a 32-bit ELF file, 2 for a 64-bit one.
+fn elf_class(p: &Path) -> Option<u8> {
+    use std::io::Read;
+    let mut h = [0u8; 5];
+    std::fs::File::open(p).ok()?.read_exact(&mut h).ok()?;
+    (&h[..4] == b"\x7fELF").then_some(h[4])
 }
 
 fn make_executable(p: &Path) -> Result<()> {
@@ -128,7 +156,7 @@ impl System for RealSystem {
             Err(e) => e.to_string(),
         };
         Err(Error::Failed(format!(
-            "Could not unpack this AppImage ({why}).\n\nIts runtime probably needs FUSE 2, which this system lacks. Install fuse-libs (Fedora) or libfuse2 (Debian/Ubuntu), or squashfs-tools so ifhai can unpack it itself, then try again."
+            "Could not unpack this AppImage ({why}).\n\nInstall squashfs-tools so ifhai can unpack it itself, then try again. If `ifhai doctor` reports that FUSE 2 is missing, install fuse-libs (Fedora) or libfuse2 (Debian/Ubuntu)."
         )))
     }
 

@@ -1876,3 +1876,60 @@ fn an_unverified_update_does_not_hold_back_the_verified_ones() {
     assert_eq!(f.run(&mut yes, &["update"]), 0, "{}", yes.err);
     assert_eq!(f.state().apps["loose"].version, "2.0");
 }
+
+// ---- built for another processor ------------------------------------------------------------
+
+/// A downloaded AppImage whose ELF header says it is built for `machine`.
+fn built_for(f: &Fixture, machine: u8, needs_fuse2: bool) -> std::path::PathBuf {
+    let mut spec = Spec::new("Etcher-1.7.9-ia32.AppImage", "Etcher");
+    spec.needs_fuse2 = needs_fuse2;
+    let src = f.download(&spec);
+    let mut bytes = std::fs::read(&src).unwrap();
+    bytes[0x12] = machine;
+    bytes[0x13] = 0;
+    std::fs::write(&src, bytes).unwrap();
+    src
+}
+
+#[test]
+fn a_32_bit_app_on_a_system_without_32_bit_support_says_so_and_runs_nothing() {
+    let f = Fixture::new();
+    let src = built_for(&f, 3, true);
+    let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(
+        io.err.contains("32-bit x86")
+            && io.err.contains("no 32-bit support")
+            && io.err.contains("FUSE will not help")
+            && io.err.contains("x86_64 version"),
+        "{}",
+        io.err
+    );
+    assert!(
+        f.system.extracted.lock().unwrap().is_empty(),
+        "never executed"
+    );
+    assert!(src.exists() && f.state().apps.is_empty());
+
+    let arm = built_for(&f, 183, false);
+    let (_, io) = f.yes(&["install", arm.to_str().unwrap()]);
+    assert!(io.err.contains("aarch64"), "{}", io.err);
+}
+
+#[test]
+fn with_32_bit_support_it_installs_using_the_32_bit_fuse_library() {
+    let mut f = Fixture::new();
+    f.host.compat32 = true;
+    // 64-bit FUSE 2 is present, the 32-bit one is not: the app has to run unpacked.
+    let src = built_for(&f, 3, true);
+    let (code, io) = f.yes(&["install", src.to_str().unwrap()]);
+    assert_eq!(code, 0, "{}", io.err);
+    assert_eq!(f.state().apps["etcher"].mode, "extract");
+
+    let mut f = Fixture::new();
+    f.host.compat32 = true;
+    f.host.fuse2_32 = true;
+    let src = built_for(&f, 3, true);
+    assert_eq!(f.yes(&["install", src.to_str().unwrap()]).0, 0);
+    assert_eq!(f.state().apps["etcher"].mode, "fuse");
+}
