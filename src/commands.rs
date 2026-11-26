@@ -1212,14 +1212,34 @@ fn update(env: &mut Env, opts: &Opts, names: &[String]) -> Result<()> {
         },
     ));
     env.io.out("\n");
-    if plans.iter().any(|p| p.expect.is_none()) {
-        confirm_unverified(
-            env,
-            st,
-            "Apply these updates, including the unverified ones?",
-        )?;
-    } else {
-        confirm(env, st, "Apply these updates?", opts.yes)?;
+    // Verified and unverified updates are decided separately, so one app without a checksum never
+    // holds back the rest (an unattended `update --yes` still applies everything it can check).
+    let (verified, unverified): (Vec<&Plan>, Vec<&Plan>) =
+        plans.iter().partition(|p| p.expect.is_some());
+    if !verified.is_empty() {
+        let q = if unverified.is_empty() {
+            "Apply these updates?"
+        } else {
+            "Apply the verified updates?"
+        };
+        confirm(env, st, q, opts.yes)?;
+    }
+    let mut accepted = verified;
+    let mut skipped = Vec::new();
+    for p in unverified {
+        if !env.io.interactive() {
+            skipped.push((
+                p.app.name.clone(),
+                "Its release has no published checksum, so it was skipped. To decide yourself, run `ifhai update` at a terminal.".to_string(),
+            ));
+            continue;
+        }
+        let q = format!("Update {} to this unverified download?", p.app.name);
+        match confirm_unverified(env, st, &q) {
+            Ok(()) => accepted.push(p),
+            Err(Error::Aborted) => notes(env, &[format!("Skipped {}.", p.app.name)]),
+            Err(e) => return Err(e),
+        }
     }
     let (mut ok, mut failed) = (
         0,
@@ -1228,7 +1248,8 @@ fn update(env: &mut Env, opts: &Opts, names: &[String]) -> Result<()> {
             .map(|e| (String::new(), e.to_string()))
             .collect::<Vec<_>>(),
     );
-    for p in &plans {
+    failed.extend(skipped);
+    for p in accepted {
         if st.fancy {
             env.io
                 .out(&format!("{} Updating {}…\n", st.step_mark(), p.app.name));

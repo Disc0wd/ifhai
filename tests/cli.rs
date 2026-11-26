@@ -1839,3 +1839,40 @@ fn an_app_file_ifhai_did_not_install_is_not_replaced() {
     );
     assert!(src.exists() && f.state().apps.is_empty());
 }
+
+#[test]
+fn an_unverified_update_does_not_hold_back_the_verified_ones() {
+    let f = Fixture::new();
+    publish_app(&f, "o/safe", "Safe", "v1.0", "1.0");
+    assert_eq!(f.yes(&["install", "o/safe"]).0, 0);
+    let loose = |tag: &str, v: &str| {
+        let spec = Spec::new(&format!("Loose-{v}-x86_64.AppImage"), "Loose");
+        let bytes = f.bytes_of(&spec);
+        f.release("o/loose", tag, &[(spec.file_name.as_str(), bytes)], false);
+    };
+    loose("v1.0", "1.0");
+    let mut io = TestIo::answering(&["y"]);
+    assert_eq!(f.run(&mut io, &["install", "o/loose"]), 0, "{}", io.err);
+    publish_app(&f, "o/safe", "Safe", "v2.0", "2.0");
+    loose("v2.0", "2.0");
+
+    // Unattended: the checked update happens, the other is reported and left alone.
+    let (code, io) = f.yes(&["update"]);
+    assert_ne!(code, 0);
+    assert!(
+        io.err.contains("Loose") && io.err.contains("was skipped"),
+        "{}",
+        io.err
+    );
+    assert_eq!(f.state().apps["safe"].version, "2.0");
+    assert_eq!(f.state().apps["loose"].version, "1.0");
+
+    // At a terminal each unverified app is asked about; Enter means no, and that is not a failure.
+    let mut no = TestIo::answering(&[""]);
+    assert_eq!(f.run(&mut no, &["update", "--yes"]), 0, "{}", no.err);
+    assert!(no.asked[0].contains("[y/N]"), "{:?}", no.asked);
+    assert_eq!(f.state().apps["loose"].version, "1.0");
+    let mut yes = TestIo::answering(&["y"]);
+    assert_eq!(f.run(&mut yes, &["update"]), 0, "{}", yes.err);
+    assert_eq!(f.state().apps["loose"].version, "2.0");
+}

@@ -119,7 +119,9 @@ both take milliseconds.
 - Downloads are **HTTPS only**. When GitHub publishes a SHA-256 for a release file (its API does
   since June 2025, or a checksum file in the release), ifhai verifies it and shows
   "verified" in the plan. When none exists the plan says **"unverified"**, and ifhai installs it only
-  after you answer yes at a terminal: `--yes` does not apply, and pressing Enter means no.
+  after you answer yes at a terminal: `--yes` does not apply, and pressing Enter means no. An
+  unattended `update` applies the verified updates, skips the unverified ones, says which, and exits
+  non-zero.
   A checksum published next to the file protects against corruption, not against a compromised
   repository.
 - **Nothing it did not create is replaced**: not a command in `~/.local/bin`, and not an app file in
